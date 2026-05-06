@@ -9,7 +9,7 @@ import {
   ChevronRight,
   Link2,
 } from 'lucide-react';
-import { useAppStore } from '../stores/appStore';
+import { useAppStore } from '../../stores/appStore';
 
 const menuItems = [
   { path: '/', label: '仪表盘', icon: LayoutDashboard },

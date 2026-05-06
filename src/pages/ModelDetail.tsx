@@ -175,7 +175,9 @@ export default function ModelDetail() {
                                 {field.name}
                               </code>
                               {field.primaryKey && (
-                                <Key className="w-4 h-4 text-yellow-500" title="主键" />
+                                <span title="主键">
+                                  <Key className="w-4 h-4 text-yellow-500" />
+                                </span>
                               )}
                             </div>
                           </td>

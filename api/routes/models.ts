@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import db from './database';
+import db from '../database';
 import { v4 as uuidv4 } from 'uuid';
 
 const router = Router();
@@ -45,7 +45,7 @@ router.get('/:name', (req, res) => {
     `).all(name);
 
     res.json({
-      ...model,
+      ...(model as Record<string, any>),
       fields: fields.map((field: any) => ({
         ...field,
         nullable: Boolean(field.nullable),
@@ -95,7 +95,7 @@ router.post('/', (req, res) => {
       });
     }
 
-    const model = db.prepare('SELECT * FROM data_models WHERE name = ?').get(name);
+    const model = db.prepare('SELECT * FROM data_models WHERE name = ?').get(name) as Record<string, any>;
     const modelFields = db.prepare('SELECT * FROM fields WHERE model_name = ?').all(name);
 
     res.status(201).json({
@@ -152,7 +152,7 @@ router.put('/:name', (req, res) => {
       });
     }
 
-    const model = db.prepare('SELECT * FROM data_models WHERE name = ?').get(name);
+    const model = db.prepare('SELECT * FROM data_models WHERE name = ?').get(name) as Record<string, any>;
     const modelFields = db.prepare('SELECT * FROM fields WHERE model_name = ?').all(name);
 
     res.json({

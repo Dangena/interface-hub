@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { ArrowLeft, Plus, Trash2, Save, Key } from 'lucide-react';
+import api from '../services/api';
 
 interface Field {
   id: string;
@@ -347,5 +348,3 @@ export default function ModelCreate() {
     </div>
   );
 }
-
-import api from '../services/api';

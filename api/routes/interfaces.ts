@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import db from './database';
+import db from '../database';
 import { v4 as uuidv4 } from 'uuid';
 
 const router = Router();
@@ -46,17 +46,17 @@ router.get('/', (req, res) => {
 router.get('/:id', (req, res) => {
   try {
     const { id } = req.params;
-    const iface = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(id);
+    const iface = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(id) as Record<string, any>;
 
     if (!iface) {
       return res.status(404).json({ error: 'Interface not found' });
     }
 
-    const formattedInterface: any = {
+    const formattedInterface: Record<string, any> = {
       ...iface,
-      tags: (iface as any).tags ? JSON.parse((iface as any).tags) : [],
-      requestSchema: (iface as any).request_schema ? JSON.parse((iface as any).request_schema) : null,
-      responseSchema: (iface as any).response_schema ? JSON.parse((iface as any).response_schema) : null,
+      tags: iface.tags ? JSON.parse(iface.tags) : [],
+      requestSchema: iface.request_schema ? JSON.parse(iface.request_schema) : null,
+      responseSchema: iface.response_schema ? JSON.parse(iface.response_schema) : null,
     };
 
     const parameters = db.prepare('SELECT * FROM parameters WHERE interface_id = ?').all(id);
@@ -101,7 +101,7 @@ router.post('/', (req, res) => {
       now
     );
 
-    const newInterface = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(id);
+    const newInterface = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(id) as Record<string, any>;
 
     res.status(201).json({
       ...newInterface,
@@ -145,7 +145,7 @@ router.put('/:id', (req, res) => {
       id
     );
 
-    const updated = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(id);
+    const updated = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(id) as Record<string, any>;
 
     res.json({
       ...updated,
