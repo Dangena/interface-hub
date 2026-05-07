@@ -100,6 +100,20 @@ db.exec(`
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 
+  CREATE TABLE IF NOT EXISTS mock_configs (
+    id TEXT PRIMARY KEY,
+    interface_id TEXT,
+    path TEXT NOT NULL,
+    method TEXT DEFAULT 'GET',
+    status_code INTEGER DEFAULT 200,
+    delay INTEGER DEFAULT 0,
+    response_config TEXT,
+    enabled INTEGER DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (interface_id) REFERENCES interfaces(id) ON DELETE CASCADE
+  );
+
   CREATE INDEX IF NOT EXISTS idx_interfaces_status ON interfaces(status);
   CREATE INDEX IF NOT EXISTS idx_interfaces_category ON interfaces(category);
   CREATE INDEX IF NOT EXISTS idx_parameters_interface ON parameters(interface_id);
@@ -107,6 +121,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_mappings_interface ON field_mappings(interface_id);
   CREATE INDEX IF NOT EXISTS idx_logs_interface ON api_logs(interface_id);
   CREATE INDEX IF NOT EXISTS idx_logs_created ON api_logs(created_at);
+  CREATE INDEX IF NOT EXISTS idx_mock_path ON mock_configs(path, method);
 `);
 
 export default db;

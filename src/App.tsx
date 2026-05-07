@@ -8,6 +8,8 @@ import ModelList from './pages/ModelList';
 import ModelCreate from './pages/ModelCreate';
 import ModelDetail from './pages/ModelDetail';
 import RelationGraph from './pages/RelationGraph';
+import MockServer from './pages/MockServer';
+import ApiTester from './pages/ApiTester';
 import { useAppStore } from './stores/appStore';
 
 function App() {
@@ -33,6 +35,8 @@ function App() {
             <Route path="/models/:name" element={<ModelDetail />} />
             <Route path="/models/:name/edit" element={<ModelCreate />} />
             <Route path="/graph" element={<RelationGraph />} />
+            <Route path="/mock" element={<MockServer />} />
+            <Route path="/testing" element={<ApiTester />} />
             <Route
               path="/settings"
               element={

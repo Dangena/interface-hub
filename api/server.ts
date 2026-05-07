@@ -1,20 +1,16 @@
-/**
- * local server entry file, for local development
- */
 import app from './app.js';
+import { initializeSampleData } from './seed.js';
 
-/**
- * start server with port
- */
 const PORT = process.env.PORT || 3001;
 
+initializeSampleData();
+
 const server = app.listen(PORT, () => {
-  console.log(`Server ready on port ${PORT}`);
+  console.log(`🚀 Server ready on port ${PORT}`);
+  console.log(`📡 API: http://localhost:${PORT}/api`);
+  console.log(`🔗 Mock Proxy: http://localhost:${PORT}/api/mock/proxy/{path}`);
 });
 
-/**
- * close server
- */
 process.on('SIGTERM', () => {
   console.log('SIGTERM signal received');
   server.close(() => {

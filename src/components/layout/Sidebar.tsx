@@ -8,6 +8,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Link2,
+  Play,
+  Zap,
 } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 
@@ -16,6 +18,8 @@ const menuItems = [
   { path: '/interfaces', label: '接口管理', icon: FileText },
   { path: '/models', label: '数据模型', icon: Database },
   { path: '/graph', label: '关系图谱', icon: GitBranch },
+  { path: '/mock', label: 'Mock服务', icon: Zap },
+  { path: '/testing', label: '接口测试', icon: Play },
   { path: '/settings', label: '设置', icon: Settings },
 ];
 
