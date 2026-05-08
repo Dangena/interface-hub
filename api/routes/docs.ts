@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import db from '../database';
+import { query } from '../database.js';
 
 const router = Router();
 
@@ -25,22 +25,22 @@ interface ModelInfo {
   fields?: any[];
 }
 
-router.get('/generate/:interfaceId', (req, res) => {
+router.get('/generate/:interfaceId', async (req, res) => {
   try {
     const { interfaceId } = req.params;
 
-    const iface = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(interfaceId) as InterfaceInfo | undefined;
+    const iface = (await query('SELECT * FROM interfaces WHERE id = $1', [interfaceId])).rows[0] as InterfaceInfo | undefined;
     if (!iface) {
       return res.status(404).json({ error: 'Interface not found' });
     }
 
-    const params = db.prepare('SELECT * FROM parameters WHERE interface_id = ?').all(interfaceId);
-    const mappings = db.prepare(`
+    const params = (await query('SELECT * FROM parameters WHERE interface_id = $1', [interfaceId])).rows;
+    const mappings = (await query(`
       SELECT fm.*, dm.name as model_name, dm.table_name 
       FROM field_mappings fm
       LEFT JOIN data_models dm ON fm.model_name = dm.name
-      WHERE fm.interface_id = ?
-    `).all(interfaceId);
+      WHERE fm.interface_id = $1
+    `, [interfaceId])).rows;
 
     const doc = {
       title: iface.name,
@@ -62,22 +62,22 @@ router.get('/generate/:interfaceId', (req, res) => {
   }
 });
 
-router.get('/export/:interfaceId', (req, res) => {
+router.get('/export/:interfaceId', async (req, res) => {
   try {
     const { interfaceId } = req.params;
 
-    const iface = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(interfaceId) as InterfaceInfo | undefined;
+    const iface = (await query('SELECT * FROM interfaces WHERE id = $1', [interfaceId])).rows[0] as InterfaceInfo | undefined;
     if (!iface) {
       return res.status(404).json({ error: 'Interface not found' });
     }
 
-    const params = db.prepare('SELECT * FROM parameters WHERE interface_id = ?').all(interfaceId);
-    const mappings = db.prepare(`
+    const params = (await query('SELECT * FROM parameters WHERE interface_id = $1', [interfaceId])).rows;
+    const mappings = (await query(`
       SELECT fm.*, dm.name as model_name, dm.table_name 
       FROM field_mappings fm
       LEFT JOIN data_models dm ON fm.model_name = dm.name
-      WHERE fm.interface_id = ?
-    `).all(interfaceId);
+      WHERE fm.interface_id = $1
+    `, [interfaceId])).rows;
 
     const markdown = generateMarkdown(iface, params as any[], mappings as any[]);
 
@@ -90,10 +90,10 @@ router.get('/export/:interfaceId', (req, res) => {
   }
 });
 
-router.get('/export-all', (req, res) => {
+router.get('/export-all', async (req, res) => {
   try {
-    const interfaces = db.prepare('SELECT * FROM interfaces ORDER BY category, name').all() as InterfaceInfo[];
-    const models = db.prepare('SELECT * FROM data_models ORDER BY name').all() as ModelInfo[];
+    const interfaces = (await query('SELECT * FROM interfaces ORDER BY category, name')).rows as InterfaceInfo[];
+    const models = (await query('SELECT * FROM data_models ORDER BY name')).rows as ModelInfo[];
 
     let markdown = `# API Documentation\n\n`;
     markdown += `Generated at: ${new Date().toISOString()}\n\n`;
@@ -114,13 +114,13 @@ router.get('/export-all', (req, res) => {
       const categoryInterfaces = interfaces.filter(i => i.category === category);
       
       for (const iface of categoryInterfaces) {
-        const params = db.prepare('SELECT * FROM parameters WHERE interface_id = ?').all(iface.id);
-        const mappings = db.prepare(`
+        const params = (await query('SELECT * FROM parameters WHERE interface_id = $1', [iface.id])).rows;
+        const mappings = (await query(`
           SELECT fm.*, dm.name as model_name 
           FROM field_mappings fm
           LEFT JOIN data_models dm ON fm.model_name = dm.name
-          WHERE fm.interface_id = ?
-        `).all(iface.id);
+          WHERE fm.interface_id = $1
+        `, [iface.id])).rows;
 
         markdown += `#### ${iface.name}\n\n`;
         markdown += `- **Method**: ${iface.method}\n`;
@@ -155,7 +155,7 @@ router.get('/export-all', (req, res) => {
 
     markdown += `## Data Models\n\n`;
     for (const model of models) {
-      const fields = db.prepare('SELECT * FROM fields WHERE model_name = ?').all(model.name);
+      const fields = (await query('SELECT * FROM fields WHERE model_name = $1', [model.name])).rows;
       
       markdown += `### ${model.name}\n\n`;
       markdown += `- **Table Name**: ${model.table_name}\n`;

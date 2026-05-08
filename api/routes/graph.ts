@@ -1,13 +1,13 @@
 import { Router } from 'express';
-import db from '../database';
+import { query } from '../database.js';
 
 const router = Router();
 
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   try {
-    const interfaces = db.prepare('SELECT * FROM interfaces').all();
-    const models = db.prepare('SELECT * FROM data_models').all();
-    const mappings = db.prepare('SELECT * FROM field_mappings').all();
+    const interfaces = (await query('SELECT * FROM interfaces')).rows;
+    const models = (await query('SELECT * FROM data_models')).rows;
+    const mappings = (await query('SELECT * FROM field_mappings')).rows;
 
     const nodes: any[] = [];
     const edges: any[] = [];

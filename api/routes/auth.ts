@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
-import db from '../database';
+import { query } from '../database';
 
 const router = Router();
 
@@ -27,8 +27,8 @@ router.post('/register', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
-    if (existing) {
+    const { rows: existingRows } = await query('SELECT id FROM users WHERE email = $1', [email]);
+    if (existingRows[0]) {
       res.status(409).json({ error: '该邮箱已被注册' });
       return;
     }
@@ -39,10 +39,10 @@ router.post('/register', async (req: Request, res: Response): Promise<void> => {
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    db.prepare(`
+    await query(`
       INSERT INTO users (id, email, name, password_hash, role, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 'developer', ?, ?)
-    `).run(id, email, name, passwordHash, now, now);
+      VALUES ($1, $2, $3, $4, 'developer', $5, $6)
+    `, [id, email, name, passwordHash, now, now]);
 
     const token = generateToken(id, email, 'developer');
 
@@ -65,7 +65,8 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email) as any;
+    const { rows } = await query('SELECT * FROM users WHERE email = $1', [email]);
+    const user = rows[0] as any;
     if (!user) {
       res.status(401).json({ error: '邮箱或密码错误' });
       return;
@@ -99,10 +100,11 @@ router.post('/logout', (req: Request, res: Response): void => {
   res.json({ message: '已成功登出' });
 });
 
-router.get('/me', authenticateToken, (req: Request, res: Response): void => {
+router.get('/me', authenticateToken, async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = (req as any).user?.userId;
-    const user = db.prepare('SELECT id, email, name, role, avatar, created_at FROM users WHERE id = ?').get(userId) as any;
+    const { rows } = await query('SELECT id, email, name, role, avatar, created_at FROM users WHERE id = $1', [userId]);
+    const user = rows[0] as any;
 
     if (!user) {
       res.status(404).json({ error: '用户不存在' });
@@ -123,23 +125,24 @@ router.put('/profile', authenticateToken, async (req: Request, res: Response): P
     const now = new Date().toISOString();
     const updates: string[] = [];
     const values: any[] = [];
+    let paramIdx = 1;
 
-    if (name) { updates.push('name = ?'); values.push(name); }
-    if (avatar) { updates.push('avatar = ?'); values.push(avatar); }
+    if (name) { updates.push(`name = $${paramIdx++}`); values.push(name); }
+    if (avatar) { updates.push(`avatar = $${paramIdx++}`); values.push(avatar); }
 
     if (updates.length === 0) {
       res.status(400).json({ error: '没有需要更新的字段' });
       return;
     }
 
-    updates.push('updated_at = ?');
+    updates.push(`updated_at = $${paramIdx++}`);
     values.push(now);
     values.push(userId);
 
-    db.prepare(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+    await query(`UPDATE users SET ${updates.join(', ')} WHERE id = $${paramIdx++}`, values);
 
-    const user = db.prepare('SELECT id, email, name, role, avatar FROM users WHERE id = ?').get(userId);
-    res.json({ user });
+    const { rows } = await query('SELECT id, email, name, role, avatar FROM users WHERE id = $1', [userId]);
+    res.json({ user: rows[0] });
   } catch (error) {
     res.status(500).json({ error: '更新个人信息失败' });
   }
@@ -160,7 +163,8 @@ router.put('/change-password', authenticateToken, async (req: Request, res: Resp
       return;
     }
 
-    const user = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(userId) as any;
+    const { rows } = await query('SELECT password_hash FROM users WHERE id = $1', [userId]);
+    const user = rows[0] as any;
     if (!user) {
       res.status(404).json({ error: '用户不存在' });
       return;
@@ -176,7 +180,7 @@ router.put('/change-password', authenticateToken, async (req: Request, res: Resp
     const passwordHash = await bcrypt.hash(newPassword, salt);
     const now = new Date().toISOString();
 
-    db.prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?').run(passwordHash, now, userId);
+    await query('UPDATE users SET password_hash = $1, updated_at = $2 WHERE id = $3', [passwordHash, now, userId]);
 
     res.json({ message: '密码修改成功' });
   } catch (error) {
@@ -210,7 +214,7 @@ export function optionalAuth(req: Request, res: Response, next: any): void {
     try {
       const decoded = jwt.verify(token, JWT_SECRET) as any;
       (req as any).user = decoded;
-    } catch {}
+    } catch (_e) {}
   }
 
   next();
@@ -225,16 +229,16 @@ export function requireAdmin(req: Request, res: Response, next: any): void {
   next();
 }
 
-router.get('/users', authenticateToken, requireAdmin, (req: Request, res: Response): void => {
+router.get('/users', authenticateToken, requireAdmin, async (req: Request, res: Response): Promise<void> => {
   try {
-    const users = db.prepare('SELECT id, email, name, role, avatar, created_at, updated_at FROM users ORDER BY created_at DESC').all() as any[];
-    res.json(users);
+    const { rows } = await query('SELECT id, email, name, role, avatar, created_at, updated_at FROM users ORDER BY created_at DESC');
+    res.json(rows);
   } catch (error) {
     res.status(500).json({ error: '获取用户列表失败' });
   }
 });
 
-router.put('/users/:id/role', authenticateToken, requireAdmin, (req: Request, res: Response): void => {
+router.put('/users/:id/role', authenticateToken, requireAdmin, async (req: Request, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const { role } = req.body;
@@ -250,20 +254,20 @@ router.put('/users/:id/role', authenticateToken, requireAdmin, (req: Request, re
       return;
     }
 
-    const existing = db.prepare('SELECT id FROM users WHERE id = ?').get(id);
-    if (!existing) {
+    const { rows: existingRows } = await query('SELECT id FROM users WHERE id = $1', [id]);
+    if (!existingRows[0]) {
       res.status(404).json({ error: '用户不存在' });
       return;
     }
 
-    db.prepare('UPDATE users SET role = ?, updated_at = ? WHERE id = ?').run(role, new Date().toISOString(), id);
+    await query('UPDATE users SET role = $1, updated_at = $2 WHERE id = $3', [role, new Date().toISOString(), id]);
     res.json({ message: '角色更新成功' });
   } catch (error) {
     res.status(500).json({ error: '更新角色失败' });
   }
 });
 
-router.delete('/users/:id', authenticateToken, requireAdmin, (req: Request, res: Response): void => {
+router.delete('/users/:id', authenticateToken, requireAdmin, async (req: Request, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const currentUserId = (req as any).user?.userId;
@@ -273,13 +277,13 @@ router.delete('/users/:id', authenticateToken, requireAdmin, (req: Request, res:
       return;
     }
 
-    const existing = db.prepare('SELECT id FROM users WHERE id = ?').get(id);
-    if (!existing) {
+    const { rows: existingRows } = await query('SELECT id FROM users WHERE id = $1', [id]);
+    if (!existingRows[0]) {
       res.status(404).json({ error: '用户不存在' });
       return;
     }
 
-    db.prepare('DELETE FROM users WHERE id = ?').run(id);
+    await query('DELETE FROM users WHERE id = $1', [id]);
     res.json({ message: '用户已删除' });
   } catch (error) {
     res.status(500).json({ error: '删除用户失败' });
@@ -295,8 +299,8 @@ router.post('/users/invite', authenticateToken, requireAdmin, async (req: Reques
       return;
     }
 
-    const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
-    if (existing) {
+    const { rows: existingRows } = await query('SELECT id FROM users WHERE email = $1', [email]);
+    if (existingRows[0]) {
       res.status(409).json({ error: '该邮箱已被注册' });
       return;
     }
@@ -308,10 +312,10 @@ router.post('/users/invite', authenticateToken, requireAdmin, async (req: Reques
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    db.prepare(`
+    await query(`
       INSERT INTO users (id, email, name, password_hash, role, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, email, name, passwordHash, role || 'developer', now, now);
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `, [id, email, name, passwordHash, role || 'developer', now, now]);
 
     res.status(201).json({
       user: { id, email, name, role: role || 'developer' },

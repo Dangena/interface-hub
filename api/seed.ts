@@ -1,9 +1,9 @@
-import db from './database';
+import { query } from './database.js';
 import { v4 as uuidv4 } from 'uuid';
 import bcrypt from 'bcryptjs';
 
-export function initializeSampleData() {
-  const count = db.prepare('SELECT COUNT(*) as count FROM interfaces').get() as any;
+export async function initializeSampleData() {
+  const count = (await query('SELECT COUNT(*) as count FROM interfaces')).rows[0] as any;
   
   if (count.count > 0) {
     return;
@@ -15,10 +15,10 @@ export function initializeSampleData() {
 
   const adminId = uuidv4();
   const hashedPassword = bcrypt.hashSync('admin123', 10);
-  db.prepare(`
+  await query(`
     INSERT INTO users (id, email, name, password_hash, role, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(adminId, 'admin@test.com', 'Admin', hashedPassword, 'admin', now, now);
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
+  `, [adminId, 'admin@test.com', 'Admin', hashedPassword, 'admin', now, now]);
 
   const interfaces = [
     {
@@ -111,13 +111,11 @@ export function initializeSampleData() {
     },
   ];
 
-  const insertInterface = db.prepare(`
-    INSERT INTO interfaces (id, name, path, method, description, category, tags, status, version, created_by, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  interfaces.forEach((iface) => {
-    insertInterface.run(
+  for (const iface of interfaces) {
+    await query(`
+      INSERT INTO interfaces (id, name, path, method, description, category, tags, status, version, created_by, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    `, [
       iface.id,
       iface.name,
       iface.path,
@@ -130,8 +128,8 @@ export function initializeSampleData() {
       adminId,
       now,
       now
-    );
-  });
+    ]);
+  }
 
   const models = [
     {
@@ -173,20 +171,17 @@ export function initializeSampleData() {
     },
   ];
 
-  const insertModel = db.prepare(`
-    INSERT INTO data_models (name, table_name, description, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?)
-  `);
+  for (const model of models) {
+    await query(`
+      INSERT INTO data_models (name, table_name, description, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5)
+    `, [model.name, model.tableName, model.description, now, now]);
 
-  const insertField = db.prepare(`
-    INSERT INTO fields (id, model_name, name, column_name, type, nullable, primary_key, comment)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  models.forEach((model) => {
-    insertModel.run(model.name, model.tableName, model.description, now, now);
-    model.fields.forEach((field) => {
-      insertField.run(
+    for (const field of model.fields) {
+      await query(`
+        INSERT INTO fields (id, model_name, name, column_name, type, nullable, primary_key, comment)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `, [
         field.id,
         model.name,
         field.name,
@@ -195,9 +190,9 @@ export function initializeSampleData() {
         field.nullable ? 1 : 0,
         field.primaryKey ? 1 : 0,
         field.comment
-      );
-    });
-  });
+      ]);
+    }
+  }
 
   const mappings = [
     { id: uuidv4(), interfaceId: interfaces[0].id, interfaceField: 'id', modelName: 'User', modelField: 'id' },
@@ -214,14 +209,12 @@ export function initializeSampleData() {
     { id: uuidv4(), interfaceId: interfaces[7].id, interfaceField: 'price', modelName: 'Product', modelField: 'price' },
   ];
 
-  const insertMapping = db.prepare(`
-    INSERT INTO field_mappings (id, interface_id, interface_field, model_name, model_field, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `);
-
-  mappings.forEach((mapping) => {
-    insertMapping.run(mapping.id, mapping.interfaceId, mapping.interfaceField, mapping.modelName, mapping.modelField, now);
-  });
+  for (const mapping of mappings) {
+    await query(`
+      INSERT INTO field_mappings (id, interface_id, interface_field, model_name, model_field, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [mapping.id, mapping.interfaceId, mapping.interfaceField, mapping.modelName, mapping.modelField, now]);
+  }
 
   const mockConfigs = [
     {
@@ -271,13 +264,11 @@ export function initializeSampleData() {
     },
   ];
 
-  const insertMock = db.prepare(`
-    INSERT INTO mock_configs (id, path, method, status_code, delay, response_config, enabled, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  mockConfigs.forEach((mock) => {
-    insertMock.run(
+  for (const mock of mockConfigs) {
+    await query(`
+      INSERT INTO mock_configs (id, path, method, status_code, delay, response_config, enabled, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `, [
       mock.id,
       mock.path,
       mock.method,
@@ -287,8 +278,8 @@ export function initializeSampleData() {
       mock.enabled,
       now,
       now
-    );
-  });
+    ]);
+  }
 
   console.log('Sample data initialized successfully!');
 }

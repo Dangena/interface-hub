@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import db from '../database.js';
+import { query as dbQuery } from '../database.js';
 
 const router = Router();
 
@@ -812,7 +812,7 @@ router.post('/generate', (req, res) => {
   }
 });
 
-router.post('/generate-from-db', (req, res) => {
+router.post('/generate-from-db', async (req, res) => {
   try {
     const { template, options, category, project } = req.body as {
       template: string;
@@ -830,22 +830,25 @@ router.post('/generate-from-db', (req, res) => {
       return res.status(400).json({ error: `Invalid template. Available: ${AVAILABLE_TEMPLATES.map(t => t.id).join(', ')}` });
     }
 
-    let query = 'SELECT i.*, p.id as param_id, p.name as param_name, p.location as param_location, p.type as param_type, p.required as param_required, p.description as param_description FROM interfaces i LEFT JOIN parameters p ON i.id = p.interface_id WHERE 1=1';
+    let sqlQuery = 'SELECT i.*, p.id as param_id, p.name as param_name, p.location as param_location, p.type as param_type, p.required as param_required, p.description as param_description FROM interfaces i LEFT JOIN parameters p ON i.id = p.interface_id WHERE 1=1';
     const params: any[] = [];
+    let paramIndex = 1;
 
     if (category) {
-      query += ' AND i.category = ?';
+      sqlQuery += ` AND i.category = $${paramIndex}`;
       params.push(category);
+      paramIndex++;
     }
 
     if (project) {
-      query += ' AND i.tags LIKE ?';
+      sqlQuery += ` AND i.tags LIKE $${paramIndex}`;
       params.push(`%"${project}"%`);
+      paramIndex++;
     }
 
-    query += ' ORDER BY i.name, p.location';
+    sqlQuery += ' ORDER BY i.name, p.location';
 
-    const rows = db.prepare(query).all(...params) as any[];
+    const rows = (await dbQuery(sqlQuery, params)).rows as any[];
 
     if (rows.length === 0) {
       return res.status(404).json({ error: 'No interfaces found matching the criteria' });

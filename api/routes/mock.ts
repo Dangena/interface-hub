@@ -1,12 +1,12 @@
 import { Router } from 'express';
-import db from '../database';
+import { query } from '../database';
 import { v4 as uuidv4 } from 'uuid';
 
 const router = Router();
 
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   try {
-    const mocks = db.prepare('SELECT * FROM mock_configs ORDER BY created_at DESC').all();
+    const { rows: mocks } = await query('SELECT * FROM mock_configs ORDER BY created_at DESC');
     res.json(mocks.map((m: any) => ({
       ...m,
       responseConfig: m.response_config ? JSON.parse(m.response_config) : null,
@@ -16,17 +16,17 @@ router.get('/', (req, res) => {
   }
 });
 
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   try {
     const { interfaceId, path, method, statusCode, delay, responseConfig, enabled } = req.body;
-    
+
     const id = uuidv4();
     const now = new Date().toISOString();
-    
-    db.prepare(`
+
+    await query(`
       INSERT INTO mock_configs (id, interface_id, path, method, status_code, delay, response_config, enabled, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    `, [
       id,
       interfaceId || null,
       path,
@@ -37,9 +37,10 @@ router.post('/', (req, res) => {
       enabled ? 1 : 0,
       now,
       now
-    );
-    
-    const mock = db.prepare('SELECT * FROM mock_configs WHERE id = ?').get(id) as Record<string, any>;
+    ]);
+
+    const { rows } = await query('SELECT * FROM mock_configs WHERE id = $1', [id]);
+    const mock = rows[0] as Record<string, any>;
     res.status(201).json({
       ...mock,
       responseConfig: responseConfig || null,
@@ -49,18 +50,18 @@ router.post('/', (req, res) => {
   }
 });
 
-router.put('/:id', (req, res) => {
+router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { path, method, statusCode, delay, responseConfig, enabled } = req.body;
-    
+
     const now = new Date().toISOString();
-    
-    db.prepare(`
+
+    await query(`
       UPDATE mock_configs
-      SET path = ?, method = ?, status_code = ?, delay = ?, response_config = ?, enabled = ?, updated_at = ?
-      WHERE id = ?
-    `).run(
+      SET path = $1, method = $2, status_code = $3, delay = $4, response_config = $5, enabled = $6, updated_at = $7
+      WHERE id = $8
+    `, [
       path,
       method || 'GET',
       statusCode || 200,
@@ -69,9 +70,10 @@ router.put('/:id', (req, res) => {
       enabled ? 1 : 0,
       now,
       id
-    );
-    
-    const mock = db.prepare('SELECT * FROM mock_configs WHERE id = ?').get(id) as Record<string, any>;
+    ]);
+
+    const { rows } = await query('SELECT * FROM mock_configs WHERE id = $1', [id]);
+    const mock = rows[0] as Record<string, any>;
     res.json({
       ...mock,
       responseConfig: responseConfig || null,
@@ -81,46 +83,48 @@ router.put('/:id', (req, res) => {
   }
 });
 
-router.delete('/:id', (req, res) => {
+router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    db.prepare('DELETE FROM mock_configs WHERE id = ?').run(id);
+    await query('DELETE FROM mock_configs WHERE id = $1', [id]);
     res.json({ message: 'Mock config deleted successfully' });
   } catch (error) {
     res.status(500).json({ error: 'Failed to delete mock config' });
   }
 });
 
-router.post('/generate', (req, res) => {
+router.post('/generate', async (req, res) => {
   try {
     const { interfaceId, count = 1 } = req.body;
-    
+
     let interfaceData = null;
     let modelMappings: any[] = [];
-    
+
     if (interfaceId) {
-      interfaceData = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(interfaceId);
-      modelMappings = db.prepare(`
-        SELECT fm.*, f.* 
+      const { rows: ifaceRows } = await query('SELECT * FROM interfaces WHERE id = $1', [interfaceId]);
+      interfaceData = ifaceRows[0] || null;
+      const { rows: mappingRows } = await query(`
+        SELECT fm.*, f.*
         FROM field_mappings fm
         LEFT JOIN fields f ON fm.model_field = f.name AND fm.model_name = f.model_name
-        WHERE fm.interface_id = ?
-      `).all(interfaceId);
+        WHERE fm.interface_id = $1
+      `, [interfaceId]);
+      modelMappings = mappingRows;
     }
-    
+
     const generatedData = [];
     for (let i = 0; i < count; i++) {
       const mockData: any = {};
-      
+
       for (const mapping of modelMappings) {
         if (mapping.interface_field && mapping.name) {
           mockData[mapping.interface_field] = generateMockValue(mapping.name, mapping.type, i);
         }
       }
-      
+
       generatedData.push(mockData);
     }
-    
+
     res.json({
       interface: interfaceData,
       mappings: modelMappings,
@@ -133,17 +137,18 @@ router.post('/generate', (req, res) => {
   }
 });
 
-router.post('/generate-from-model', (req, res) => {
+router.post('/generate-from-model', async (req, res) => {
   try {
     const { modelName, count = 1 } = req.body;
-    
-    const model = db.prepare('SELECT * FROM data_models WHERE name = ?').get(modelName);
+
+    const { rows: modelRows } = await query('SELECT * FROM data_models WHERE name = $1', [modelName]);
+    const model = modelRows[0];
     if (!model) {
       return res.status(404).json({ error: 'Model not found' });
     }
-    
-    const fields = db.prepare('SELECT * FROM fields WHERE model_name = ?').all(modelName) as any[];
-    
+
+    const { rows: fields } = await query('SELECT * FROM fields WHERE model_name = $1', [modelName]);
+
     const generatedData = [];
     for (let i = 0; i < count; i++) {
       const record: any = {};
@@ -152,7 +157,7 @@ router.post('/generate-from-model', (req, res) => {
       }
       generatedData.push(record);
     }
-    
+
     res.json({
       model,
       fields,
@@ -167,46 +172,46 @@ router.post('/generate-from-model', (req, res) => {
 function generateMockValue(fieldName: string, fieldType: string | null, index: number): any {
   const lowerName = (fieldName || '').toLowerCase();
   const type = (fieldType || 'varchar').toLowerCase();
-  
+
   if (lowerName.includes('id')) {
     return index + 1;
   }
-  
+
   if (lowerName.includes('uuid') || lowerName.includes('guid')) {
     return uuidv4();
   }
-  
+
   if (lowerName.includes('email')) {
     return `user${index + 1}@example.com`;
   }
-  
+
   if (lowerName.includes('phone') || lowerName.includes('mobile') || lowerName.includes('tel')) {
     return `138${String(index + 1).padStart(8, '0')}`;
   }
-  
+
   if (lowerName.includes('name') && lowerName.includes('first')) {
     const firstNames = ['John', 'Jane', 'Michael', 'Sarah', 'David', 'Emily', 'Zhang', 'Li'];
     return firstNames[index % firstNames.length];
   }
-  
+
   if (lowerName.includes('name') && lowerName.includes('last')) {
     const lastNames = ['Smith', 'Johnson', 'Brown', 'Davis', 'Wang', 'Zhang', 'Lee', 'Chen'];
     return lastNames[index % lastNames.length];
   }
-  
+
   if (lowerName.includes('name')) {
     const names = ['Alice', 'Bob', 'Charlie', 'Diana', 'Eve', 'Frank', 'Grace', 'Henry'];
     return names[index % names.length];
   }
-  
+
   if (lowerName.includes('age')) {
     return Math.floor(Math.random() * 50) + 18;
   }
-  
+
   if (lowerName.includes('gender')) {
     return index % 2 === 0 ? 'male' : 'female';
   }
-  
+
   if (lowerName.includes('date') || lowerName.includes('_at') || lowerName.includes('_on')) {
     if (type.includes('date') && !type.includes('time')) {
       const date = new Date();
@@ -217,31 +222,31 @@ function generateMockValue(fieldName: string, fieldType: string | null, index: n
     date.setHours(date.getHours() - Math.floor(Math.random() * 8760));
     return date.toISOString();
   }
-  
+
   if (lowerName.includes('time') || lowerName.includes('timestamp')) {
     return new Date().toISOString();
   }
-  
+
   if (lowerName.includes('price') || lowerName.includes('amount') || lowerName.includes('cost')) {
     return (Math.random() * 1000).toFixed(2);
   }
-  
+
   if (lowerName.includes('count') || lowerName.includes('quantity') || lowerName.includes('number')) {
     return Math.floor(Math.random() * 100) + 1;
   }
-  
+
   if (lowerName.includes('active') || lowerName.includes('enabled') || lowerName.includes('status')) {
     return index % 3 !== 0;
   }
-  
+
   if (lowerName.includes('url') || lowerName.includes('link') || lowerName.includes('href')) {
     return `https://example.com/item/${index + 1}`;
   }
-  
+
   if (lowerName.includes('avatar') || lowerName.includes('image') || lowerName.includes('photo')) {
     return `https://api.dicebear.com/7.x/avataaars/svg?seed=${index + 1}`;
   }
-  
+
   if (lowerName.includes('description') || lowerName.includes('desc') || lowerName.includes('content')) {
     const descriptions = [
       'This is a sample description for testing purposes.',
@@ -252,7 +257,7 @@ function generateMockValue(fieldName: string, fieldType: string | null, index: n
     ];
     return descriptions[index % descriptions.length];
   }
-  
+
   if (lowerName.includes('title') || lowerName.includes('subject')) {
     const titles = [
       'Introduction to Programming',
@@ -263,12 +268,12 @@ function generateMockValue(fieldName: string, fieldType: string | null, index: n
     ];
     return titles[index % titles.length];
   }
-  
+
   if (lowerName.includes('category') || lowerName.includes('type')) {
     const categories = ['Electronics', 'Books', 'Clothing', 'Food', 'Sports'];
     return categories[index % categories.length];
   }
-  
+
   if (lowerName.includes('address')) {
     const addresses = [
       '123 Main St, City, Country',
@@ -277,39 +282,39 @@ function generateMockValue(fieldName: string, fieldType: string | null, index: n
     ];
     return addresses[index % addresses.length];
   }
-  
+
   if (lowerName.includes('city')) {
     const cities = ['New York', 'Los Angeles', 'Chicago', 'Houston', 'Phoenix'];
     return cities[index % cities.length];
   }
-  
+
   if (lowerName.includes('country')) {
     const countries = ['USA', 'China', 'Japan', 'Germany', 'France'];
     return countries[index % countries.length];
   }
-  
+
   if (type.includes('int') || type.includes('integer') || type.includes('number')) {
     return index + 1;
   }
-  
+
   if (type.includes('decimal') || type.includes('float') || type.includes('double')) {
     return (Math.random() * 100).toFixed(2);
   }
-  
+
   if (type.includes('boolean') || type.includes('bool')) {
     return index % 2 === 0;
   }
-  
+
   return `sample_${fieldName}_${index + 1}`;
 }
 
 function generateTemplate(mappings: any[]): any {
   const template: any = {};
-  
+
   for (const mapping of mappings) {
     if (mapping.interface_field && mapping.name) {
       const type = (mapping.type || 'varchar').toLowerCase();
-      
+
       if (type.includes('int') || type.includes('integer')) {
         template[mapping.interface_field] = {
           type: 'integer',
@@ -339,19 +344,19 @@ function generateTemplate(mappings: any[]): any {
       }
     }
   }
-  
+
   return template;
 }
 
-router.all('/proxy/*', (req, res) => {
+router.all('/proxy/*', async (req, res) => {
   try {
     const mockPath = req.params[0];
     const method = req.method;
     const requestPath = `/${mockPath}`;
 
-    const allMocks = db.prepare(`
-      SELECT * FROM mock_configs WHERE method = ? AND enabled = 1
-    `).all(method) as any[];
+    const { rows: allMocks } = await query(`
+      SELECT * FROM mock_configs WHERE method = $1 AND enabled = 1
+    `, [method]);
 
     let matchedMock: any = null;
     let pathParams: Record<string, string> = {};
@@ -389,15 +394,15 @@ router.all('/proxy/*', (req, res) => {
     }
 
     if (!matchedMock) {
-      const exactMock = db.prepare(`
-        SELECT * FROM mock_configs 
-        WHERE path = ? AND method = ? AND enabled = 1
-      `).get(requestPath, method) as any;
+      const { rows: exactRows } = await query(`
+        SELECT * FROM mock_configs
+        WHERE path = $1 AND method = $2 AND enabled = 1
+      `, [requestPath, method]);
 
-      if (!exactMock) {
+      if (!exactRows[0]) {
         return res.status(404).json({ error: 'Mock not found', path: requestPath, method });
       }
-      matchedMock = exactMock;
+      matchedMock = exactRows[0];
     }
 
     const delay = matchedMock.delay || 0;

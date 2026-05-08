@@ -1,12 +1,12 @@
 import { Router, type Request, type Response } from 'express';
-import db from '../database';
+import { query } from '../database.js';
 import { v4 as uuidv4 } from 'uuid';
 
 const router = Router();
 
 let activeEnvironmentId: string | null = null;
 
-db.exec(`
+await query(`
   CREATE TABLE IF NOT EXISTS environments (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -16,14 +16,14 @@ db.exec(`
     headers TEXT DEFAULT '{}',
     authType TEXT DEFAULT 'none',
     authConfig TEXT DEFAULT '{}',
-    createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   )
 `);
 
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   try {
-    const environments = db.prepare('SELECT * FROM environments ORDER BY createdAt DESC').all();
+    const environments = (await query('SELECT * FROM environments ORDER BY createdAt DESC')).rows;
     res.json(environments);
   } catch (error) {
     console.error('List environments error:', error);
@@ -31,7 +31,7 @@ router.get('/', (req: Request, res: Response) => {
   }
 });
 
-router.post('/', (req: Request, res: Response) => {
+router.post('/', async (req: Request, res: Response) => {
   try {
     const { name, type, baseUrl, variables, headers, authType, authConfig } = req.body;
 
@@ -46,10 +46,10 @@ router.post('/', (req: Request, res: Response) => {
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    db.prepare(`
+    await query(`
       INSERT INTO environments (id, name, type, baseUrl, variables, headers, authType, authConfig, createdAt, updatedAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    `, [
       id,
       name,
       type,
@@ -60,9 +60,9 @@ router.post('/', (req: Request, res: Response) => {
       JSON.stringify(authConfig || {}),
       now,
       now,
-    );
+    ]);
 
-    const env = db.prepare('SELECT * FROM environments WHERE id = ?').get(id);
+    const env = (await query('SELECT * FROM environments WHERE id = $1', [id])).rows[0];
     res.status(201).json(env);
   } catch (error) {
     console.error('Create environment error:', error);
@@ -70,12 +70,12 @@ router.post('/', (req: Request, res: Response) => {
   }
 });
 
-router.put('/:id', (req: Request, res: Response) => {
+router.put('/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { name, type, baseUrl, variables, headers, authType, authConfig } = req.body;
 
-    const existing = db.prepare('SELECT * FROM environments WHERE id = ?').get(id) as any;
+    const existing = (await query('SELECT * FROM environments WHERE id = $1', [id])).rows[0] as any;
     if (!existing) {
       return res.status(404).json({ error: 'Environment not found' });
     }
@@ -87,18 +87,18 @@ router.put('/:id', (req: Request, res: Response) => {
     const now = new Date().toISOString();
     const updatedName = name ?? existing.name;
     const updatedType = type ?? existing.type;
-    const updatedBaseUrl = baseUrl !== undefined ? baseUrl : existing.baseUrl;
+    const updatedBaseUrl = baseUrl !== undefined ? baseUrl : existing.baseurl;
     const updatedVariables = variables !== undefined ? JSON.stringify(variables) : existing.variables;
     const updatedHeaders = headers !== undefined ? JSON.stringify(headers) : existing.headers;
-    const updatedAuthType = authType ?? existing.authType;
-    const updatedAuthConfig = authConfig !== undefined ? JSON.stringify(authConfig) : existing.authConfig;
+    const updatedAuthType = authType ?? existing.authtype;
+    const updatedAuthConfig = authConfig !== undefined ? JSON.stringify(authConfig) : existing.authconfig;
 
-    db.prepare(`
-      UPDATE environments SET name = ?, type = ?, baseUrl = ?, variables = ?, headers = ?, authType = ?, authConfig = ?, updatedAt = ?
-      WHERE id = ?
-    `).run(updatedName, updatedType, updatedBaseUrl, updatedVariables, updatedHeaders, updatedAuthType, updatedAuthConfig, now, id);
+    await query(`
+      UPDATE environments SET name = $1, type = $2, baseUrl = $3, variables = $4, headers = $5, authType = $6, authConfig = $7, updatedAt = $8
+      WHERE id = $9
+    `, [updatedName, updatedType, updatedBaseUrl, updatedVariables, updatedHeaders, updatedAuthType, updatedAuthConfig, now, id]);
 
-    const env = db.prepare('SELECT * FROM environments WHERE id = ?').get(id);
+    const env = (await query('SELECT * FROM environments WHERE id = $1', [id])).rows[0];
     res.json(env);
   } catch (error) {
     console.error('Update environment error:', error);
@@ -106,16 +106,16 @@ router.put('/:id', (req: Request, res: Response) => {
   }
 });
 
-router.delete('/:id', (req: Request, res: Response) => {
+router.delete('/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
 
-    const existing = db.prepare('SELECT * FROM environments WHERE id = ?').get(id) as any;
+    const existing = (await query('SELECT * FROM environments WHERE id = $1', [id])).rows[0] as any;
     if (!existing) {
       return res.status(404).json({ error: 'Environment not found' });
     }
 
-    db.prepare('DELETE FROM environments WHERE id = ?').run(id);
+    await query('DELETE FROM environments WHERE id = $1', [id]);
 
     if (activeEnvironmentId === id) {
       activeEnvironmentId = null;
@@ -128,11 +128,11 @@ router.delete('/:id', (req: Request, res: Response) => {
   }
 });
 
-router.post('/:id/clone', (req: Request, res: Response) => {
+router.post('/:id/clone', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
 
-    const existing = db.prepare('SELECT * FROM environments WHERE id = ?').get(id) as any;
+    const existing = (await query('SELECT * FROM environments WHERE id = $1', [id])).rows[0] as any;
     if (!existing) {
       return res.status(404).json({ error: 'Environment not found' });
     }
@@ -140,23 +140,23 @@ router.post('/:id/clone', (req: Request, res: Response) => {
     const newId = uuidv4();
     const now = new Date().toISOString();
 
-    db.prepare(`
+    await query(`
       INSERT INTO environments (id, name, type, baseUrl, variables, headers, authType, authConfig, createdAt, updatedAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    `, [
       newId,
       `${existing.name} (copy)`,
       existing.type,
-      existing.baseUrl,
+      existing.baseurl,
       existing.variables,
       existing.headers,
-      existing.authType,
-      existing.authConfig,
+      existing.authtype,
+      existing.authconfig,
       now,
       now,
-    );
+    ]);
 
-    const env = db.prepare('SELECT * FROM environments WHERE id = ?').get(newId);
+    const env = (await query('SELECT * FROM environments WHERE id = $1', [newId])).rows[0];
     res.status(201).json(env);
   } catch (error) {
     console.error('Clone environment error:', error);
@@ -168,12 +168,12 @@ router.get('/:id/test', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
 
-    const existing = db.prepare('SELECT * FROM environments WHERE id = ?').get(id) as any;
+    const existing = (await query('SELECT * FROM environments WHERE id = $1', [id])).rows[0] as any;
     if (!existing) {
       return res.status(404).json({ error: 'Environment not found' });
     }
 
-    const baseUrl = existing.baseUrl;
+    const baseUrl = existing.baseurl;
     if (!baseUrl) {
       return res.status(400).json({ error: 'Environment has no baseUrl configured' });
     }
@@ -230,11 +230,11 @@ router.get('/:id/test', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/:id/switch', (req: Request, res: Response) => {
+router.post('/:id/switch', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
 
-    const existing = db.prepare('SELECT * FROM environments WHERE id = ?').get(id) as any;
+    const existing = (await query('SELECT * FROM environments WHERE id = $1', [id])).rows[0] as any;
     if (!existing) {
       return res.status(404).json({ error: 'Environment not found' });
     }
@@ -252,13 +252,13 @@ router.post('/:id/switch', (req: Request, res: Response) => {
   }
 });
 
-router.get('/active', (req: Request, res: Response) => {
+router.get('/active', async (req: Request, res: Response) => {
   try {
     if (!activeEnvironmentId) {
       return res.json({ activeEnvironment: null });
     }
 
-    const env = db.prepare('SELECT * FROM environments WHERE id = ?').get(activeEnvironmentId) as any;
+    const env = (await query('SELECT * FROM environments WHERE id = $1', [activeEnvironmentId])).rows[0] as any;
     if (!env) {
       activeEnvironmentId = null;
       return res.json({ activeEnvironment: null });
@@ -271,16 +271,16 @@ router.get('/active', (req: Request, res: Response) => {
   }
 });
 
-router.get('/:id/compare/:otherId', (req: Request, res: Response) => {
+router.get('/:id/compare/:otherId', async (req: Request, res: Response) => {
   try {
     const { id, otherId } = req.params;
 
-    const envA = db.prepare('SELECT * FROM environments WHERE id = ?').get(id) as any;
+    const envA = (await query('SELECT * FROM environments WHERE id = $1', [id])).rows[0] as any;
     if (!envA) {
       return res.status(404).json({ error: 'First environment not found' });
     }
 
-    const envB = db.prepare('SELECT * FROM environments WHERE id = ?').get(otherId) as any;
+    const envB = (await query('SELECT * FROM environments WHERE id = $1', [otherId])).rows[0] as any;
     if (!envB) {
       return res.status(404).json({ error: 'Second environment not found' });
     }

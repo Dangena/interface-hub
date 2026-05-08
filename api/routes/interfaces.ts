@@ -1,18 +1,18 @@
 import { Router } from 'express';
-import db from '../database';
+import { pool, query } from '../database';
 import { v4 as uuidv4 } from 'uuid';
 import { cacheManager } from '../utils/cache';
 
 const router = Router();
 
-function recordChange(interfaceId: string, action: string, fieldName: string | null, oldValue: string | null, newValue: string | null, operator?: string) {
-  db.prepare(`
+async function recordChange(interfaceId: string, action: string, fieldName: string | null, oldValue: string | null, newValue: string | null, operator?: string) {
+  await query(`
     INSERT INTO change_history (id, interface_id, action, field_name, old_value, new_value, operator, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(uuidv4(), interfaceId, action, fieldName, oldValue, newValue, operator || 'system', new Date().toISOString());
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+  `, [uuidv4(), interfaceId, action, fieldName, oldValue, newValue, operator || 'system', new Date().toISOString()]);
 }
 
-function diffAndRecord(interfaceId: string, oldData: Record<string, any>, newData: Record<string, any>, operator?: string) {
+async function diffAndRecord(interfaceId: string, oldData: Record<string, any>, newData: Record<string, any>, operator?: string) {
   const trackedFields: Record<string, string> = {
     name: '接口名称',
     path: '接口路径',
@@ -27,62 +27,67 @@ function diffAndRecord(interfaceId: string, oldData: Record<string, any>, newDat
     const oldVal = String(oldData[field] ?? '');
     const newVal = String(newData[field] ?? '');
     if (oldVal !== newVal) {
-      recordChange(interfaceId, 'update', label, oldVal || null, newVal || null, operator);
+      await recordChange(interfaceId, 'update', label, oldVal || null, newVal || null, operator);
     }
   }
 
   const oldTags = JSON.stringify(oldData.tags || []);
   const newTags = JSON.stringify(newData.tags || []);
   if (oldTags !== newTags) {
-    recordChange(interfaceId, 'update', '标签', oldTags, newTags, operator);
+    await recordChange(interfaceId, 'update', '标签', oldTags, newTags, operator);
   }
 }
 
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const { status, category, search, page = '1', limit = '20' } = req.query;
     const pageNum = Math.max(1, parseInt(page as string) || 1);
     const limitNum = Math.min(100, Math.max(1, parseInt(limit as string) || 20));
     const offset = (pageNum - 1) * limitNum;
     const cacheKey = `interfaces:list:${status || 'all'}:${category || 'all'}:${search || 'none'}:${pageNum}:${limitNum}`;
-    
+
     const cached = cacheManager.get(cacheKey);
     if (cached) {
       return res.json(cached);
     }
 
-    let query = 'SELECT * FROM interfaces WHERE 1=1';
-    let countQuery = 'SELECT COUNT(*) as total FROM interfaces WHERE 1=1';
+    let sql = 'SELECT * FROM interfaces WHERE 1=1';
+    let countSql = 'SELECT COUNT(*) as total FROM interfaces WHERE 1=1';
     const params: any[] = [];
     const countParams: any[] = [];
+    let paramIdx = 1;
+    let countParamIdx = 1;
 
     if (status) {
-      query += ' AND status = ?';
-      countQuery += ' AND status = ?';
+      sql += ` AND status = $${paramIdx++}`;
+      countSql += ` AND status = $${countParamIdx++}`;
       params.push(status);
       countParams.push(status);
     }
 
     if (category) {
-      query += ' AND category = ?';
-      countQuery += ' AND category = ?';
+      sql += ` AND category = $${paramIdx++}`;
+      countSql += ` AND category = $${countParamIdx++}`;
       params.push(category);
       countParams.push(category);
     }
 
     if (search) {
-      query += ' AND (name LIKE ? OR path LIKE ? OR description LIKE ?)';
-      countQuery += ' AND (name LIKE ? OR path LIKE ? OR description LIKE ?)';
+      sql += ` AND (name LIKE $${paramIdx} OR path LIKE $${paramIdx + 1} OR description LIKE $${paramIdx + 2})`;
+      countSql += ` AND (name LIKE $${countParamIdx} OR path LIKE $${countParamIdx + 1} OR description LIKE $${countParamIdx + 2})`;
       const searchTerm = `%${search}%`;
       params.push(searchTerm, searchTerm, searchTerm);
       countParams.push(searchTerm, searchTerm, searchTerm);
+      paramIdx += 3;
+      countParamIdx += 3;
     }
 
-    query += ' ORDER BY updated_at DESC LIMIT ? OFFSET ?';
+    sql += ` ORDER BY updated_at DESC LIMIT $${paramIdx++} OFFSET $${paramIdx++}`;
     params.push(limitNum, offset);
 
-    const interfaces = db.prepare(query).all(...params);
-    const { total } = db.prepare(countQuery).get(...countParams) as any;
+    const { rows: interfaces } = await query(sql, params);
+    const { rows: countRows } = await query(countSql, countParams);
+    const { total } = countRows[0] as any;
 
     const formattedInterfaces = interfaces.map((iface: any) => ({
       ...iface,
@@ -108,17 +113,18 @@ router.get('/', (req, res) => {
   }
 });
 
-router.get('/:id', (req, res) => {
+router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const cacheKey = `interfaces:detail:${id}`;
-    
+
     const cached = cacheManager.get(cacheKey);
     if (cached) {
       return res.json(cached);
     }
 
-    const iface = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(id) as Record<string, any>;
+    const { rows } = await query('SELECT * FROM interfaces WHERE id = $1', [id]);
+    const iface = rows[0] as Record<string, any> | undefined;
 
     if (!iface) {
       return res.status(404).json({ error: 'Interface not found' });
@@ -131,14 +137,14 @@ router.get('/:id', (req, res) => {
       responseSchema: iface.response_schema ? JSON.parse(iface.response_schema) : null,
     };
 
-    const parameters = db.prepare('SELECT * FROM parameters WHERE interface_id = ?').all(id);
-    formattedInterface.parameters = parameters.map((param: any) => ({
+    const { rows: paramRows } = await query('SELECT * FROM parameters WHERE interface_id = $1', [id]);
+    formattedInterface.parameters = paramRows.map((param: any) => ({
       ...param,
       required: Boolean(param.required),
     }));
 
-    const mappings = db.prepare('SELECT * FROM field_mappings WHERE interface_id = ?').all(id);
-    formattedInterface.mappings = mappings;
+    const { rows: mappingRows } = await query('SELECT * FROM field_mappings WHERE interface_id = $1', [id]);
+    formattedInterface.mappings = mappingRows;
 
     cacheManager.set(cacheKey, formattedInterface, 5 * 60 * 1000);
     res.json(formattedInterface);
@@ -147,7 +153,7 @@ router.get('/:id', (req, res) => {
   }
 });
 
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   try {
     cacheManager.invalidate('interfaces:');
     const { name, path, method, description, category, tags, status, version, requestSchema, responseSchema, createdBy, parameters } = req.body;
@@ -155,17 +161,13 @@ router.post('/', (req, res) => {
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    const insertInterface = db.prepare(`
-      INSERT INTO interfaces (id, name, path, method, description, category, tags, status, version, request_schema, response_schema, created_by, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    const insertParam = db.prepare(`
-      INSERT INTO parameters (id, interface_id, name, location, type, required, description, example)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    const transaction = db.transaction(() => {
-      insertInterface.run(
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`
+        INSERT INTO interfaces (id, name, path, method, description, category, tags, status, version, request_schema, response_schema, created_by, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+      `, [
         id,
         name,
         path,
@@ -180,12 +182,15 @@ router.post('/', (req, res) => {
         createdBy || 'system',
         now,
         now
-      );
+      ]);
 
       if (parameters && Array.isArray(parameters)) {
         for (const param of parameters) {
           if (param.name) {
-            insertParam.run(
+            await client.query(`
+              INSERT INTO parameters (id, interface_id, name, location, type, required, description, example)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            `, [
               uuidv4(),
               id,
               param.name,
@@ -194,39 +199,45 @@ router.post('/', (req, res) => {
               param.required ? 1 : 0,
               param.description || '',
               param.example || ''
-            );
+            ]);
           }
         }
       }
-    });
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
 
-    transaction();
+    await recordChange(id, 'create', null, null, `创建接口: ${name}`, createdBy);
 
-    recordChange(id, 'create', null, null, `创建接口: ${name}`, createdBy);
-
-    const newInterface = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(id) as Record<string, any>;
-    const newParams = db.prepare('SELECT * FROM parameters WHERE interface_id = ?').all(id) as any[];
+    const { rows: newRows } = await query('SELECT * FROM interfaces WHERE id = $1', [id]);
+    const newInterface = newRows[0] as Record<string, any>;
+    const { rows: newParamRows } = await query('SELECT * FROM parameters WHERE interface_id = $1', [id]);
 
     res.status(201).json({
       ...newInterface,
       tags: tags || [],
       requestSchema: requestSchema || null,
       responseSchema: responseSchema || null,
-      parameters: newParams.map((p: any) => ({ ...p, required: Boolean(p.required) })),
+      parameters: newParamRows.map((p: any) => ({ ...p, required: Boolean(p.required) })),
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to create interface' });
   }
 });
 
-router.put('/:id', (req, res) => {
+router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     cacheManager.delete(`interfaces:detail:${id}`);
     cacheManager.invalidate('interfaces:list:');
     const body = req.body;
 
-    const existing = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(id) as Record<string, any>;
+    const { rows: existingRows } = await query('SELECT * FROM interfaces WHERE id = $1', [id]);
+    const existing = existingRows[0] as Record<string, any> | undefined;
     if (!existing) {
       return res.status(404).json({ error: 'Interface not found' });
     }
@@ -250,19 +261,14 @@ router.put('/:id', (req, res) => {
 
     const now = new Date().toISOString();
 
-    const updateInterface = db.prepare(`
-      UPDATE interfaces
-      SET name = ?, path = ?, method = ?, description = ?, category = ?, tags = ?, status = ?, version = ?, request_schema = ?, response_schema = ?, updated_at = ?
-      WHERE id = ?
-    `);
-    const deleteOldParams = db.prepare('DELETE FROM parameters WHERE interface_id = ?');
-    const insertParam = db.prepare(`
-      INSERT INTO parameters (id, interface_id, name, location, type, required, description, example)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    const transaction = db.transaction(() => {
-      updateInterface.run(
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`
+        UPDATE interfaces
+        SET name = $1, path = $2, method = $3, description = $4, category = $5, tags = $6, status = $7, version = $8, request_schema = $9, response_schema = $10, updated_at = $11
+        WHERE id = $12
+      `, [
         name,
         path,
         method,
@@ -275,13 +281,16 @@ router.put('/:id', (req, res) => {
         responseSchema ? JSON.stringify(responseSchema) : null,
         now,
         id
-      );
+      ]);
 
       if (parameters && Array.isArray(parameters)) {
-        deleteOldParams.run(id);
+        await client.query('DELETE FROM parameters WHERE interface_id = $1', [id]);
         for (const param of parameters) {
           if (param.name) {
-            insertParam.run(
+            await client.query(`
+              INSERT INTO parameters (id, interface_id, name, location, type, required, description, example)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            `, [
               param.id || uuidv4(),
               id,
               param.name,
@@ -290,36 +299,41 @@ router.put('/:id', (req, res) => {
               param.required ? 1 : 0,
               param.description || '',
               param.example || ''
-            );
+            ]);
           }
         }
       }
-    });
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
 
-    transaction();
+    await diffAndRecord(id, oldData, { name, path, method, description, category, tags, status, version });
 
-    diffAndRecord(id, oldData, { name, path, method, description, category, tags, status, version });
-
-    const updated = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(id) as Record<string, any>;
-    const updatedParams = db.prepare('SELECT * FROM parameters WHERE interface_id = ?').all(id) as any[];
+    const { rows: updatedRows } = await query('SELECT * FROM interfaces WHERE id = $1', [id]);
+    const updated = updatedRows[0] as Record<string, any>;
+    const { rows: updatedParamRows } = await query('SELECT * FROM parameters WHERE interface_id = $1', [id]);
 
     res.json({
       ...updated,
       tags,
       requestSchema,
       responseSchema,
-      parameters: updatedParams.map((p: any) => ({ ...p, required: Boolean(p.required) })),
+      parameters: updatedParamRows.map((p: any) => ({ ...p, required: Boolean(p.required) })),
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to update interface' });
   }
 });
 
-router.post('/:id/parameters', (req, res) => {
+router.post('/:id/parameters', async (req, res) => {
   try {
     const { id } = req.params;
-    const existing = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(id);
-    if (!existing) {
+    const { rows: existingRows } = await query('SELECT * FROM interfaces WHERE id = $1', [id]);
+    if (!existingRows[0]) {
       return res.status(404).json({ error: 'Interface not found' });
     }
 
@@ -329,10 +343,10 @@ router.post('/:id/parameters', (req, res) => {
     }
 
     const paramId = uuidv4();
-    db.prepare(`
+    await query(`
       INSERT INTO parameters (id, interface_id, name, location, type, required, description, example)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(paramId, id, name, location || 'query', type || 'string', required ? 1 : 0, description || '', example || '');
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `, [paramId, id, name, location || 'query', type || 'string', required ? 1 : 0, description || '', example || '']);
 
     cacheManager.delete(`interfaces:detail:${id}`);
 
@@ -351,19 +365,19 @@ router.post('/:id/parameters', (req, res) => {
   }
 });
 
-router.put('/:id/parameters/:paramId', (req, res) => {
+router.put('/:id/parameters/:paramId', async (req, res) => {
   try {
     const { id, paramId } = req.params;
-    const existing = db.prepare('SELECT * FROM parameters WHERE id = ? AND interface_id = ?').get(paramId, id);
-    if (!existing) {
+    const { rows: existingRows } = await query('SELECT * FROM parameters WHERE id = $1 AND interface_id = $2', [paramId, id]);
+    if (!existingRows[0]) {
       return res.status(404).json({ error: 'Parameter not found' });
     }
 
     const { name, location, type, required, description, example } = req.body;
-    db.prepare(`
-      UPDATE parameters SET name = ?, location = ?, type = ?, required = ?, description = ?, example = ?
-      WHERE id = ? AND interface_id = ?
-    `).run(name, location, type, required ? 1 : 0, description, example, paramId, id);
+    await query(`
+      UPDATE parameters SET name = $1, location = $2, type = $3, required = $4, description = $5, example = $6
+      WHERE id = $7 AND interface_id = $8
+    `, [name, location, type, required ? 1 : 0, description, example, paramId, id]);
 
     cacheManager.delete(`interfaces:detail:${id}`);
 
@@ -373,15 +387,15 @@ router.put('/:id/parameters/:paramId', (req, res) => {
   }
 });
 
-router.delete('/:id/parameters/:paramId', (req, res) => {
+router.delete('/:id/parameters/:paramId', async (req, res) => {
   try {
     const { id, paramId } = req.params;
-    const existing = db.prepare('SELECT * FROM parameters WHERE id = ? AND interface_id = ?').get(paramId, id);
-    if (!existing) {
+    const { rows: existingRows } = await query('SELECT * FROM parameters WHERE id = $1 AND interface_id = $2', [paramId, id]);
+    if (!existingRows[0]) {
       return res.status(404).json({ error: 'Parameter not found' });
     }
 
-    db.prepare('DELETE FROM parameters WHERE id = ?').run(paramId);
+    await query('DELETE FROM parameters WHERE id = $1', [paramId]);
     cacheManager.delete(`interfaces:detail:${id}`);
 
     res.json({ message: 'Parameter deleted successfully' });
@@ -390,32 +404,33 @@ router.delete('/:id/parameters/:paramId', (req, res) => {
   }
 });
 
-router.delete('/:id', (req, res) => {
+router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
-    const existing = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(id) as Record<string, any>;
+    const { rows: existingRows } = await query('SELECT * FROM interfaces WHERE id = $1', [id]);
+    const existing = existingRows[0] as Record<string, any> | undefined;
     if (!existing) {
       return res.status(404).json({ error: 'Interface not found' });
     }
 
-    recordChange(id, 'delete', null, `删除接口: ${existing.name}`, null);
+    await recordChange(id, 'delete', null, `删除接口: ${existing.name}`, null);
 
-    const deleteMappings = db.prepare('DELETE FROM field_mappings WHERE interface_id = ?');
-    const deleteParams = db.prepare('DELETE FROM parameters WHERE interface_id = ?');
-    const deleteMocks = db.prepare('DELETE FROM mock_configs WHERE interface_id = ?');
-    const deleteHistory = db.prepare('DELETE FROM change_history WHERE interface_id = ?');
-    const deleteInterface = db.prepare('DELETE FROM interfaces WHERE id = ?');
-
-    const transaction = db.transaction(() => {
-      deleteMappings.run(id);
-      deleteParams.run(id);
-      deleteMocks.run(id);
-      deleteHistory.run(id);
-      deleteInterface.run(id);
-    });
-
-    transaction();
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM field_mappings WHERE interface_id = $1', [id]);
+      await client.query('DELETE FROM parameters WHERE interface_id = $1', [id]);
+      await client.query('DELETE FROM mock_configs WHERE interface_id = $1', [id]);
+      await client.query('DELETE FROM change_history WHERE interface_id = $1', [id]);
+      await client.query('DELETE FROM interfaces WHERE id = $1', [id]);
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
 
     cacheManager.delete(`interfaces:detail:${id}`);
     cacheManager.invalidate('interfaces:list:');
@@ -426,7 +441,7 @@ router.delete('/:id', (req, res) => {
   }
 });
 
-router.get('/:id/history', (req, res) => {
+router.get('/:id/history', async (req, res) => {
   try {
     const { id } = req.params;
     const { page = '1', limit = '20' } = req.query;
@@ -434,16 +449,18 @@ router.get('/:id/history', (req, res) => {
     const limitNum = Math.min(100, Math.max(1, parseInt(limit as string) || 20));
     const offset = (pageNum - 1) * limitNum;
 
-    const existing = db.prepare('SELECT id FROM interfaces WHERE id = ?').get(id);
-    if (!existing) {
+    const { rows: existingRows } = await query('SELECT id FROM interfaces WHERE id = $1', [id]);
+    if (!existingRows[0]) {
       return res.status(404).json({ error: 'Interface not found' });
     }
 
-    const history = db.prepare(
-      'SELECT * FROM change_history WHERE interface_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?'
-    ).all(id, limitNum, offset) as any[];
+    const { rows: history } = await query(
+      'SELECT * FROM change_history WHERE interface_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3',
+      [id, limitNum, offset]
+    );
 
-    const { total } = db.prepare('SELECT COUNT(*) as total FROM change_history WHERE interface_id = ?').get(id) as any;
+    const { rows: countRows } = await query('SELECT COUNT(*) as total FROM change_history WHERE interface_id = $1', [id]);
+    const { total } = countRows[0] as any;
 
     res.json({
       data: history,
@@ -459,29 +476,31 @@ router.get('/:id/history', (req, res) => {
   }
 });
 
-router.post('/:id/versions', (req, res) => {
+router.post('/:id/versions', async (req, res) => {
   try {
     const { id } = req.params;
     const { description, operator } = req.body;
 
-    const existing = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(id) as any;
+    const { rows: existingRows } = await query('SELECT * FROM interfaces WHERE id = $1', [id]);
+    const existing = existingRows[0] as any;
     if (!existing) {
       return res.status(404).json({ error: 'Interface not found' });
     }
 
-    const parameters = db.prepare('SELECT * FROM parameters WHERE interface_id = ?').all(id) as any[];
+    const { rows: paramRows } = await query('SELECT * FROM parameters WHERE interface_id = $1', [id]);
+    const parameters = paramRows as any[];
     const snapshot = JSON.stringify({ ...existing, parameters });
 
     const versionId = uuidv4();
     const now = new Date().toISOString();
 
-    db.prepare(`
+    await query(`
       INSERT INTO interface_versions (id, interface_id, version, snapshot, description, operator, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(versionId, id, existing.version || '1.0.0', snapshot, description || '', operator || 'system', now);
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `, [versionId, id, existing.version || '1.0.0', snapshot, description || '', operator || 'system', now]);
 
     cacheManager.delete(`interfaces:detail:${id}`);
-    recordChange(id, 'update', '版本快照', null, `保存版本 ${existing.version}`, operator);
+    await recordChange(id, 'update', '版本快照', null, `保存版本 ${existing.version}`, operator);
 
     res.status(201).json({
       id: versionId,
@@ -496,17 +515,18 @@ router.post('/:id/versions', (req, res) => {
   }
 });
 
-router.get('/:id/versions', (req, res) => {
+router.get('/:id/versions', async (req, res) => {
   try {
     const { id } = req.params;
-    const existing = db.prepare('SELECT id FROM interfaces WHERE id = ?').get(id);
-    if (!existing) {
+    const { rows: existingRows } = await query('SELECT id FROM interfaces WHERE id = $1', [id]);
+    if (!existingRows[0]) {
       return res.status(404).json({ error: 'Interface not found' });
     }
 
-    const versions = db.prepare(
-      'SELECT id, interface_id, version, description, operator, created_at FROM interface_versions WHERE interface_id = ? ORDER BY created_at DESC'
-    ).all(id) as any[];
+    const { rows: versions } = await query(
+      'SELECT id, interface_id, version, description, operator, created_at FROM interface_versions WHERE interface_id = $1 ORDER BY created_at DESC',
+      [id]
+    );
 
     res.json(versions);
   } catch (error) {
@@ -514,10 +534,11 @@ router.get('/:id/versions', (req, res) => {
   }
 });
 
-router.get('/:id/versions/:versionId', (req, res) => {
+router.get('/:id/versions/:versionId', async (req, res) => {
   try {
     const { id, versionId } = req.params;
-    const version = db.prepare('SELECT * FROM interface_versions WHERE id = ? AND interface_id = ?').get(versionId, id) as any;
+    const { rows } = await query('SELECT * FROM interface_versions WHERE id = $1 AND interface_id = $2', [versionId, id]);
+    const version = rows[0] as any;
     if (!version) {
       return res.status(404).json({ error: 'Version not found' });
     }
@@ -529,12 +550,13 @@ router.get('/:id/versions/:versionId', (req, res) => {
   }
 });
 
-router.post('/:id/versions/:versionId/restore', (req, res) => {
+router.post('/:id/versions/:versionId/restore', async (req, res) => {
   try {
     const { id, versionId } = req.params;
     const { operator } = req.body;
 
-    const version = db.prepare('SELECT * FROM interface_versions WHERE id = ? AND interface_id = ?').get(versionId, id) as any;
+    const { rows: versionRows } = await query('SELECT * FROM interface_versions WHERE id = $1 AND interface_id = $2', [versionId, id]);
+    const version = versionRows[0] as any;
     if (!version) {
       return res.status(404).json({ error: 'Version not found' });
     }
@@ -542,46 +564,51 @@ router.post('/:id/versions/:versionId/restore', (req, res) => {
     const snapshot = JSON.parse(version.snapshot);
 
     const now = new Date().toISOString();
-    db.prepare(`
+    await query(`
       UPDATE interfaces
-      SET name = ?, path = ?, method = ?, description = ?, category = ?, tags = ?, status = ?, version = ?, request_schema = ?, response_schema = ?, updated_at = ?
-      WHERE id = ?
-    `).run(
+      SET name = $1, path = $2, method = $3, description = $4, category = $5, tags = $6, status = $7, version = $8, request_schema = $9, response_schema = $10, updated_at = $11
+      WHERE id = $12
+    `, [
       snapshot.name, snapshot.path, snapshot.method, snapshot.description,
       snapshot.category, snapshot.tags, snapshot.status, snapshot.version,
       snapshot.request_schema, snapshot.response_schema, now, id
-    );
+    ]);
 
-    const deleteOldParams = db.prepare('DELETE FROM parameters WHERE interface_id = ?');
-    const insertParam = db.prepare(`
-      INSERT INTO parameters (id, interface_id, name, location, type, required, description, example)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    const transaction = db.transaction(() => {
-      deleteOldParams.run(id);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM parameters WHERE interface_id = $1', [id]);
       for (const param of snapshot.parameters || []) {
-        insertParam.run(
+        await client.query(`
+          INSERT INTO parameters (id, interface_id, name, location, type, required, description, example)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `, [
           uuidv4(), id, param.name, param.location, param.type,
           param.required ? 1 : 0, param.description || '', param.example || ''
-        );
+        ]);
       }
-    });
-    transaction();
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
 
     cacheManager.delete(`interfaces:detail:${id}`);
     cacheManager.invalidate('interfaces:list:');
-    recordChange(id, 'update', '版本回滚', null, `回滚到版本 ${snapshot.version}`, operator);
+    await recordChange(id, 'update', '版本回滚', null, `回滚到版本 ${snapshot.version}`, operator);
 
-    const restored = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(id) as any;
-    const restoredParams = db.prepare('SELECT * FROM parameters WHERE interface_id = ?').all(id) as any[];
+    const { rows: restoredRows } = await query('SELECT * FROM interfaces WHERE id = $1', [id]);
+    const restored = restoredRows[0] as any;
+    const { rows: restoredParamRows } = await query('SELECT * FROM parameters WHERE interface_id = $1', [id]);
 
     res.json({
       ...restored,
       tags: snapshot.tags ? JSON.parse(snapshot.tags) : [],
       requestSchema: snapshot.request_schema ? JSON.parse(snapshot.request_schema) : null,
       responseSchema: snapshot.response_schema ? JSON.parse(snapshot.response_schema) : null,
-      parameters: restoredParams.map((p: any) => ({ ...p, required: Boolean(p.required) })),
+      parameters: restoredParamRows.map((p: any) => ({ ...p, required: Boolean(p.required) })),
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to restore version' });

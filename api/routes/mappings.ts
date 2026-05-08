@@ -1,15 +1,15 @@
 import { Router } from 'express';
-import db from '../database';
+import { query } from '../database.js';
 import { v4 as uuidv4 } from 'uuid';
 
 const router = Router();
 
-router.post('/smart-match', (req, res) => {
+router.post('/smart-match', async (req, res) => {
   try {
     const { interfaceId, modelName } = req.body;
 
-    const interfaceData = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(interfaceId);
-    const modelData = db.prepare('SELECT * FROM data_models WHERE name = ?').get(modelName);
+    const interfaceData = (await query('SELECT * FROM interfaces WHERE id = $1', [interfaceId])).rows[0];
+    const modelData = (await query('SELECT * FROM data_models WHERE name = $1', [modelName])).rows[0];
 
     if (!interfaceData) {
       return res.status(404).json({ error: 'Interface not found' });
@@ -18,8 +18,8 @@ router.post('/smart-match', (req, res) => {
       return res.status(404).json({ error: 'Model not found' });
     }
 
-    const params = db.prepare('SELECT * FROM parameters WHERE interface_id = ?').all(interfaceId) as any[];
-    const fields = db.prepare('SELECT * FROM fields WHERE model_name = ?').all(modelName) as any[];
+    const params = (await query('SELECT * FROM parameters WHERE interface_id = $1', [interfaceId])).rows as any[];
+    const fields = (await query('SELECT * FROM fields WHERE model_name = $1', [modelName])).rows as any[];
 
     const suggestions: Array<{
       interfaceField: string;
@@ -203,10 +203,10 @@ router.post('/apply-batch', async (req, res) => {
     const now = new Date().toISOString();
 
     for (const mapping of mappings) {
-      const existing = db.prepare(`
+      const existing = (await query(`
         SELECT * FROM field_mappings
-        WHERE interface_id = ? AND interface_field = ? AND model_name = ? AND model_field = ?
-      `).get(mapping.interfaceId, mapping.interfaceField, mapping.modelName, mapping.modelField);
+        WHERE interface_id = $1 AND interface_field = $2 AND model_name = $3 AND model_field = $4
+      `, [mapping.interfaceId, mapping.interfaceField, mapping.modelName, mapping.modelField])).rows[0];
 
       if (existing) {
         results.skipped.push(mapping);
@@ -214,12 +214,12 @@ router.post('/apply-batch', async (req, res) => {
       }
 
       const id = uuidv4();
-      db.prepare(`
+      await query(`
         INSERT INTO field_mappings (id, interface_id, interface_field, model_name, model_field, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(id, mapping.interfaceId, mapping.interfaceField, mapping.modelName, mapping.modelField, now);
+        VALUES ($1, $2, $3, $4, $5, $6)
+      `, [id, mapping.interfaceId, mapping.interfaceField, mapping.modelName, mapping.modelField, now]);
 
-      const savedMapping = db.prepare('SELECT * FROM field_mappings WHERE id = ?').get(id);
+      const savedMapping = (await query('SELECT * FROM field_mappings WHERE id = $1', [id])).rows[0];
       results.created.push(savedMapping);
     }
 
@@ -233,14 +233,14 @@ router.post('/apply-batch', async (req, res) => {
   }
 });
 
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   try {
     const { interfaceId, interfaceField, modelName, modelField } = req.body;
 
-    const existing = db.prepare(`
+    const existing = (await query(`
       SELECT * FROM field_mappings
-      WHERE interface_id = ? AND interface_field = ? AND model_name = ? AND model_field = ?
-    `).get(interfaceId, interfaceField, modelName, modelField);
+      WHERE interface_id = $1 AND interface_field = $2 AND model_name = $3 AND model_field = $4
+    `, [interfaceId, interfaceField, modelName, modelField])).rows[0];
 
     if (existing) {
       return res.status(400).json({ error: 'Mapping already exists' });
@@ -249,12 +249,12 @@ router.post('/', (req, res) => {
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    db.prepare(`
+    await query(`
       INSERT INTO field_mappings (id, interface_id, interface_field, model_name, model_field, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(id, interfaceId, interfaceField, modelName, modelField, now);
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [id, interfaceId, interfaceField, modelName, modelField, now]);
 
-    const mapping = db.prepare('SELECT * FROM field_mappings WHERE id = ?').get(id);
+    const mapping = (await query('SELECT * FROM field_mappings WHERE id = $1', [id])).rows[0];
 
     res.status(201).json(mapping);
   } catch (error) {
@@ -262,16 +262,16 @@ router.post('/', (req, res) => {
   }
 });
 
-router.get('/interface/:interfaceId', (req, res) => {
+router.get('/interface/:interfaceId', async (req, res) => {
   try {
     const { interfaceId } = req.params;
-    const mappings = db.prepare(`
+    const mappings = (await query(`
       SELECT fm.*, dm.table_name, f.column_name as model_column, f.type as model_type
       FROM field_mappings fm
       JOIN data_models dm ON fm.model_name = dm.name
       LEFT JOIN fields f ON fm.model_field = f.name AND f.model_name = fm.model_name
-      WHERE fm.interface_id = ?
-    `).all(interfaceId);
+      WHERE fm.interface_id = $1
+    `, [interfaceId])).rows;
 
     res.json(mappings);
   } catch (error) {
@@ -279,15 +279,15 @@ router.get('/interface/:interfaceId', (req, res) => {
   }
 });
 
-router.get('/model/:modelName', (req, res) => {
+router.get('/model/:modelName', async (req, res) => {
   try {
     const { modelName } = req.params;
-    const mappings = db.prepare(`
+    const mappings = (await query(`
       SELECT fm.*, i.name as interface_name, i.path as interface_path, i.method
       FROM field_mappings fm
       JOIN interfaces i ON fm.interface_id = i.id
-      WHERE fm.model_name = ?
-    `).all(modelName);
+      WHERE fm.model_name = $1
+    `, [modelName])).rows;
 
     res.json(mappings);
   } catch (error) {
@@ -295,16 +295,16 @@ router.get('/model/:modelName', (req, res) => {
   }
 });
 
-router.delete('/:id', (req, res) => {
+router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
-    const existing = db.prepare('SELECT * FROM field_mappings WHERE id = ?').get(id);
+    const existing = (await query('SELECT * FROM field_mappings WHERE id = $1', [id])).rows[0];
     if (!existing) {
       return res.status(404).json({ error: 'Mapping not found' });
     }
 
-    db.prepare('DELETE FROM field_mappings WHERE id = ?').run(id);
+    await query('DELETE FROM field_mappings WHERE id = $1', [id]);
 
     res.json({ message: 'Mapping deleted successfully' });
   } catch (error) {

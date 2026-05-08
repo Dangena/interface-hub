@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import db from '../database';
+import { query } from '../database.js';
 
 const router = Router();
 
@@ -237,14 +237,14 @@ router.post('/import/project', async (req, res) => {
     let projectUuid = projectId;
     if (createProject && !projectId) {
       projectUuid = uuidv4();
-      db.prepare(`
+      await query(`
         INSERT INTO projects (id, name, description, color, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(projectUuid, createProject.name || 'Imported Project', createProject.description || '', '#3B82F6', now, now);
+        VALUES ($1, $2, $3, $4, $5, $6)
+      `, [projectUuid, createProject.name || 'Imported Project', createProject.description || '', '#3B82F6', now, now]);
     }
 
     for (const iface of interfaces) {
-      const existing = db.prepare('SELECT * FROM interfaces WHERE path = ? AND method = ?').get(iface.path, iface.method);
+      const existing = (await query('SELECT * FROM interfaces WHERE path = $1 AND method = $2', [iface.path, iface.method])).rows[0];
       if (existing && !overwrite) {
         imported.skipped++;
         continue;
@@ -253,22 +253,22 @@ router.post('/import/project', async (req, res) => {
       const id = existing ? (existing as any).id : uuidv4();
 
       if (existing && overwrite) {
-        db.prepare(`
-          UPDATE interfaces SET name = ?, description = ?, category = ?, tags = ?, updated_at = ?
-          WHERE id = ?
-        `).run(
+        await query(`
+          UPDATE interfaces SET name = $1, description = $2, category = $3, tags = $4, updated_at = $5
+          WHERE id = $6
+        `, [
           iface.name,
           iface.description,
           projectUuid || iface.tags[0] || 'Imported',
           JSON.stringify([...(iface.tags || []), iface.framework].filter(Boolean)),
           now,
           id
-        );
+        ]);
       } else {
-        db.prepare(`
+        await query(`
           INSERT INTO interfaces (id, name, path, method, description, category, tags, status, version, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        `, [
           id,
           iface.name,
           iface.path,
@@ -280,16 +280,16 @@ router.post('/import/project', async (req, res) => {
           '1.0.0',
           now,
           now
-        );
+        ]);
       }
 
       if (iface.parameters?.length > 0) {
-        db.prepare('DELETE FROM parameters WHERE interface_id = ?').run(id);
+        await query('DELETE FROM parameters WHERE interface_id = $1', [id]);
         for (const param of iface.parameters) {
-          db.prepare(`
+          await query(`
             INSERT INTO parameters (id, interface_id, name, location, type, required, description)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-          `).run(uuidv4(), id, param.name, param.location, param.type, param.required ? 1 : 0, '');
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+          `, [uuidv4(), id, param.name, param.location, param.type, param.required ? 1 : 0, '']);
         }
       }
 
@@ -297,7 +297,7 @@ router.post('/import/project', async (req, res) => {
     }
 
     for (const model of models) {
-      const existing = db.prepare('SELECT * FROM data_models WHERE name = ?').get(model.name);
+      const existing = (await query('SELECT * FROM data_models WHERE name = $1', [model.name])).rows[0];
       if (existing && !overwrite) {
         imported.skipped++;
         continue;
@@ -306,24 +306,24 @@ router.post('/import/project', async (req, res) => {
       const tableName = model.name.toLowerCase().replace(/([A-Z])/g, '_$1').replace(/^_/, '') + 's';
 
       if (existing && overwrite) {
-        db.prepare(`
-          UPDATE data_models SET description = ?, table_name = ?, updated_at = ?
-          WHERE name = ?
-        `).run(model.description || '', tableName, now, model.name);
-        db.prepare('DELETE FROM fields WHERE model_name = ?').run(model.name);
+        await query(`
+          UPDATE data_models SET description = $1, table_name = $2, updated_at = $3
+          WHERE name = $4
+        `, [model.description || '', tableName, now, model.name]);
+        await query('DELETE FROM fields WHERE model_name = $1', [model.name]);
       } else if (!existing) {
-        db.prepare(`
+        await query(`
           INSERT INTO data_models (name, table_name, description, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(model.name, tableName, model.description || '', now, now);
+          VALUES ($1, $2, $3, $4, $5)
+        `, [model.name, tableName, model.description || '', now, now]);
       }
 
       for (const field of model.fields) {
         const columnName = field.name.toLowerCase().replace(/([A-Z])/g, '_$1').replace(/^_/, '');
-        db.prepare(`
+        await query(`
           INSERT INTO fields (id, model_name, name, column_name, type, nullable, comment)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `).run(
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `, [
           uuidv4(),
           model.name,
           field.name,
@@ -331,7 +331,7 @@ router.post('/import/project', async (req, res) => {
           field.type,
           field.nullable ? 1 : 0,
           field.comment || ''
-        );
+        ]);
       }
 
       imported.models++;
@@ -339,23 +339,23 @@ router.post('/import/project', async (req, res) => {
 
     for (const table of tables) {
       const modelName = singularize(table.name);
-      const existing = db.prepare('SELECT * FROM data_models WHERE table_name = ? OR name = ?').get(table.name, modelName);
+      const existing = (await query('SELECT * FROM data_models WHERE table_name = $1 OR name = $2', [table.name, modelName])).rows[0];
       if (existing && !overwrite) {
         imported.skipped++;
         continue;
       }
 
       if (!existing) {
-        db.prepare(`
+        await query(`
           INSERT INTO data_models (name, table_name, description, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(modelName, table.name, `Imported from ${table.source}`, now, now);
+          VALUES ($1, $2, $3, $4, $5)
+        `, [modelName, table.name, `Imported from ${table.source}`, now, now]);
 
         for (const column of table.columns) {
-          db.prepare(`
+          await query(`
             INSERT INTO fields (id, model_name, name, column_name, type, nullable, comment)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-          `).run(
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+          `, [
             uuidv4(),
             modelName,
             column.name,
@@ -363,7 +363,7 @@ router.post('/import/project', async (req, res) => {
             column.type,
             column.nullable ? 1 : 0,
             column.comment || ''
-          );
+          ]);
         }
 
         imported.tables++;
@@ -373,16 +373,16 @@ router.post('/import/project', async (req, res) => {
     if (interfaces.length > 0 && models.length > 0) {
       const mappings = generateAutoMappings(interfaces, models);
       for (const mapping of mappings) {
-        const iface = db.prepare('SELECT id FROM interfaces WHERE path = ? AND method = ?').get(mapping.interfacePath, mapping.interfaceMethod) as any;
-        const model = db.prepare('SELECT name FROM data_models WHERE name = ?').get(mapping.modelName) as any;
+        const iface = (await query('SELECT id FROM interfaces WHERE path = $1 AND method = $2', [mapping.interfacePath, mapping.interfaceMethod])).rows[0] as any;
+        const model = (await query('SELECT name FROM data_models WHERE name = $1', [mapping.modelName])).rows[0] as any;
 
         if (iface && model) {
-          const existing = db.prepare('SELECT * FROM field_mappings WHERE interface_id = ? AND interface_field = ? AND model_name = ?').get(iface.id, mapping.interfaceField, mapping.modelName);
+          const existing = (await query('SELECT * FROM field_mappings WHERE interface_id = $1 AND interface_field = $2 AND model_name = $3', [iface.id, mapping.interfaceField, mapping.modelName])).rows[0];
           if (!existing) {
-            db.prepare(`
+            await query(`
               INSERT INTO field_mappings (id, interface_id, interface_field, model_name, model_field, created_at)
-              VALUES (?, ?, ?, ?, ?, ?)
-            `).run(uuidv4(), iface.id, mapping.interfaceField, mapping.modelName, mapping.modelField, now);
+              VALUES ($1, $2, $3, $4, $5, $6)
+            `, [uuidv4(), iface.id, mapping.interfaceField, mapping.modelName, mapping.modelField, now]);
           }
         }
       }

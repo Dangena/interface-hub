@@ -1,8 +1,8 @@
-import db from '../database';
+import { query } from '../database.js';
 
 describe('Graph API', () => {
-  beforeAll(() => {
-    db.exec(`
+  beforeAll(async () => {
+    await query(`
       CREATE TABLE IF NOT EXISTS interfaces (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -18,10 +18,10 @@ describe('Graph API', () => {
         created_by TEXT,
         created_at TEXT,
         updated_at TEXT
-      );
+      )
     `);
 
-    db.exec(`
+    await query(`
       CREATE TABLE IF NOT EXISTS data_models (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -30,10 +30,10 @@ describe('Graph API', () => {
         schema TEXT,
         created_at TEXT,
         updated_at TEXT
-      );
+      )
     `);
 
-    db.exec(`
+    await query(`
       CREATE TABLE IF NOT EXISTS interface_model_mappings (
         id TEXT PRIMARY KEY,
         interface_id TEXT NOT NULL,
@@ -43,12 +43,12 @@ describe('Graph API', () => {
         created_at TEXT,
         FOREIGN KEY (interface_id) REFERENCES interfaces(id),
         FOREIGN KEY (model_id) REFERENCES data_models(id)
-      );
+      )
     `);
   });
 
-  test('should generate graph nodes for interfaces', () => {
-    const interfaces = db.prepare('SELECT * FROM interfaces LIMIT 10').all();
+  test('should generate graph nodes for interfaces', async () => {
+    const interfaces = (await query('SELECT * FROM interfaces LIMIT 10')).rows;
     expect(Array.isArray(interfaces)).toBe(true);
 
     const nodes = interfaces.map((iface: any) => ({
@@ -75,8 +75,8 @@ describe('Graph API', () => {
     });
   });
 
-  test('should generate graph nodes for database models', () => {
-    const models = db.prepare('SELECT * FROM data_models LIMIT 10').all();
+  test('should generate graph nodes for database models', async () => {
+    const models = (await query('SELECT * FROM data_models LIMIT 10')).rows;
     expect(Array.isArray(models)).toBe(true);
 
     const nodes = models.map((model: any) => ({
@@ -101,8 +101,8 @@ describe('Graph API', () => {
     });
   });
 
-  test('should generate graph edges from mappings', () => {
-    const mappings = db.prepare('SELECT * FROM interface_model_mappings').all();
+  test('should generate graph edges from mappings', async () => {
+    const mappings = (await query('SELECT * FROM interface_model_mappings')).rows;
     expect(Array.isArray(mappings)).toBe(true);
 
     const edges = mappings.map((mapping: any) => ({
@@ -124,10 +124,10 @@ describe('Graph API', () => {
     });
   });
 
-  test('should create complete graph structure', () => {
-    const interfaces = db.prepare('SELECT * FROM interfaces LIMIT 10').all();
-    const models = db.prepare('SELECT * FROM data_models LIMIT 10').all();
-    const mappings = db.prepare('SELECT * FROM interface_model_mappings').all();
+  test('should create complete graph structure', async () => {
+    const interfaces = (await query('SELECT * FROM interfaces LIMIT 10')).rows;
+    const models = (await query('SELECT * FROM data_models LIMIT 10')).rows;
+    const mappings = (await query('SELECT * FROM interface_model_mappings')).rows;
 
     const nodes = [
       ...interfaces.map((iface: any) => ({

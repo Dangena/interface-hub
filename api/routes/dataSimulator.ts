@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import db from '../database';
+import { pool, query } from '../database.js';
 import { authenticateToken } from './auth';
 
 const router = Router();
@@ -187,21 +187,23 @@ function generateDataForFields(fields: FieldInfo[]): Record<string, any> {
   return data;
 }
 
-router.get('/fields/:modelName', authenticateToken, (req, res) => {
+router.get('/fields/:modelName', authenticateToken, async (req, res) => {
   try {
     const { modelName } = req.params;
-    const fields = db.prepare(`
+    const fields = (await query(`
       SELECT name, column_name, type, nullable, primary_key, default_value, comment
-      FROM fields WHERE model_name = ? ORDER BY name
-    `).all(modelName) as FieldInfo[];
+      FROM fields WHERE model_name = $1 ORDER BY name
+    `, [modelName])).rows as FieldInfo[];
 
     if (!fields.length) {
       return res.status(404).json({ error: 'Model not found' });
     }
 
+    const tableNameRow = (await query('SELECT table_name FROM data_models WHERE name = $1', [modelName])).rows[0] as { table_name: string };
+
     res.json({
       modelName,
-      tableName: db.prepare('SELECT table_name FROM data_models WHERE name = ?').get(modelName) as { table_name: string },
+      tableName: tableNameRow,
       fields: fields.map(f => ({
         name: f.name,
         columnName: f.column_name,
@@ -219,46 +221,46 @@ router.get('/fields/:modelName', authenticateToken, (req, res) => {
   }
 });
 
-router.get('/interface/:interfaceId', authenticateToken, (req, res) => {
+router.get('/interface/:interfaceId', authenticateToken, async (req, res) => {
   try {
     const { interfaceId } = req.params;
 
-    const iface = db.prepare(`
+    const iface = (await query(`
       SELECT id, name, path, method, description, request_schema, response_schema
-      FROM interfaces WHERE id = ?
-    `).get(interfaceId) as any;
+      FROM interfaces WHERE id = $1
+    `, [interfaceId])).rows[0] as any;
 
     if (!iface) {
       return res.status(404).json({ error: 'Interface not found' });
     }
 
-    const parameters = db.prepare(`
-      SELECT name, location, type FROM parameters WHERE interface_id = ?
-    `).all(interfaceId);
+    const parameters = (await query(`
+      SELECT name, location, type FROM parameters WHERE interface_id = $1
+    `, [interfaceId])).rows;
 
     let requestSchema = null;
     if (iface.request_schema) {
       try {
         requestSchema = JSON.parse(iface.request_schema);
-      } catch {
+      } catch (_e: any) {
         requestSchema = null;
       }
     }
 
-    const mappings = db.prepare(`
+    const mappings = (await query(`
       SELECT fm.interface_field, fm.model_field, fm.model_name, m.table_name
       FROM field_mappings fm
       JOIN data_models m ON fm.model_name = m.name
-      WHERE fm.interface_id = ?
-    `).all(interfaceId) as any[];
+      WHERE fm.interface_id = $1
+    `, [interfaceId])).rows as any[];
 
     let targetFields: FieldInfo[] = [];
     if (mappings.length > 0) {
       const modelName = mappings[0].model_name;
-      targetFields = db.prepare(`
+      targetFields = (await query(`
         SELECT name, column_name, type, nullable, primary_key, default_value, comment
-        FROM fields WHERE model_name = ?
-      `).all(modelName) as FieldInfo[];
+        FROM fields WHERE model_name = $1
+      `, [modelName])).rows as FieldInfo[];
     }
 
     res.json({
@@ -280,7 +282,7 @@ router.get('/interface/:interfaceId', authenticateToken, (req, res) => {
   }
 });
 
-router.post('/generate', authenticateToken, (req, res) => {
+router.post('/generate', authenticateToken, async (req, res) => {
   try {
     const {
       sourceType,
@@ -303,33 +305,33 @@ router.post('/generate', authenticateToken, (req, res) => {
     const records: Record<string, any>[] = [];
 
     if (sourceType === 'model' && modelName) {
-      const fields = db.prepare(`
+      const fields = (await query(`
         SELECT name, column_name, type, nullable, primary_key, default_value, comment
-        FROM fields WHERE model_name = ?
-      `).all(modelName) as FieldInfo[];
+        FROM fields WHERE model_name = $1
+      `, [modelName])).rows as FieldInfo[];
 
       for (let i = 0; i < count; i++) {
         records.push(generateDataForFields(fields));
       }
     } else if (sourceType === 'interface' && interfaceId) {
-      const mappings = db.prepare(`
+      const mappings = (await query(`
         SELECT fm.interface_field, fm.model_field, fm.model_name
-        FROM field_mappings fm WHERE fm.interface_id = ?
-      `).all(interfaceId) as any[];
+        FROM field_mappings fm WHERE fm.interface_id = $1
+      `, [interfaceId])).rows as any[];
 
       if (mappings.length > 0) {
-        const fields = db.prepare(`
+        const fields = (await query(`
           SELECT name, column_name, type, nullable, primary_key, default_value, comment
-          FROM fields WHERE model_name = ?
-        `).all(mappings[0].model_name) as FieldInfo[];
+          FROM fields WHERE model_name = $1
+        `, [mappings[0].model_name])).rows as FieldInfo[];
 
         for (let i = 0; i < count; i++) {
           records.push(generateDataForFields(fields));
         }
       } else {
-        const parameters = db.prepare(`
-          SELECT name, location, type FROM parameters WHERE interface_id = ?
-        `).all(interfaceId) as any[];
+        const parameters = (await query(`
+          SELECT name, location, type FROM parameters WHERE interface_id = $1
+        `, [interfaceId])).rows as any[];
 
         const fakeFields: FieldInfo[] = parameters.map(p => ({
           name: p.name,
@@ -375,7 +377,7 @@ router.post('/generate', authenticateToken, (req, res) => {
   }
 });
 
-router.post('/push-to-database', authenticateToken, (req, res) => {
+router.post('/push-to-database', authenticateToken, async (req, res) => {
   try {
     const { modelName, records }: { modelName: string; records: Record<string, any>[] } = req.body;
 
@@ -383,25 +385,23 @@ router.post('/push-to-database', authenticateToken, (req, res) => {
       return res.status(400).json({ error: 'Invalid request body' });
     }
 
-    const model = db.prepare('SELECT table_name FROM data_models WHERE name = ?').get(modelName) as { table_name: string } | undefined;
+    const model = (await query('SELECT table_name FROM data_models WHERE name = $1', [modelName])).rows[0] as { table_name: string } | undefined;
     if (!model) {
       return res.status(404).json({ error: 'Model not found' });
     }
 
-    const fields = db.prepare(`
-      SELECT column_name FROM fields WHERE model_name = ?
-    `).all(modelName) as { column_name: string }[];
+    const fields = (await query(`
+      SELECT column_name FROM fields WHERE model_name = $1
+    `, [modelName])).rows as { column_name: string }[];
 
     const columns = fields.map(f => f.column_name);
-    const placeholders = columns.map(() => '?').join(', ');
-    const insertStmt = db.prepare(`
-      INSERT INTO ${model.table_name} (${columns.join(', ')})
-      VALUES (${placeholders})
-    `);
+    const placeholders = columns.map((_, i) => `$${i + 1}`).join(', ');
 
-    const insertMany = db.transaction((recs: Record<string, any>[]) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
       let inserted = 0;
-      for (const record of recs) {
+      for (const record of records) {
         try {
           const values = columns.map(col => {
             const val = record[col];
@@ -410,24 +410,27 @@ router.post('/push-to-database', authenticateToken, (req, res) => {
             }
             return typeof val === 'object' ? JSON.stringify(val) : val;
           });
-          insertStmt.run(...values);
+          await client.query(`INSERT INTO ${model.table_name} (${columns.join(', ')}) VALUES (${placeholders})`, values);
           inserted++;
         } catch (err) {
           console.error('Insert error:', err);
         }
       }
-      return inserted;
-    });
+      await client.query('COMMIT');
 
-    const inserted = insertMany(records);
-
-    res.json({
-      success: true,
-      totalRecords: records.length,
-      insertedRecords: inserted,
-      failedRecords: records.length - inserted,
-      tableName: model.table_name,
-    });
+      res.json({
+        success: true,
+        totalRecords: records.length,
+        insertedRecords: inserted,
+        failedRecords: records.length - inserted,
+        tableName: model.table_name,
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
   } catch (error) {
     console.error('Push to database error:', error);
     res.status(500).json({ error: 'Failed to push data to database' });
@@ -446,9 +449,9 @@ router.post('/push-to-api', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Invalid request body' });
     }
 
-    const iface = db.prepare(`
-      SELECT id, path, method FROM interfaces WHERE id = ?
-    `).get(interfaceId) as any;
+    const iface = (await query(`
+      SELECT id, path, method FROM interfaces WHERE id = $1
+    `, [interfaceId])).rows[0] as any;
 
     if (!iface) {
       return res.status(404).json({ error: 'Interface not found' });
@@ -478,7 +481,7 @@ router.post('/push-to-api', authenticateToken, async (req, res) => {
 
         try {
           result.data = await response.json();
-        } catch {
+        } catch (_e: any) {
           result.data = await response.text();
         }
 

@@ -136,7 +136,7 @@ async function getTableList(config: DataSourceConfig, schemaName?: string): Prom
       try {
         const countResult = await pool.query(`SELECT COUNT(*) as count FROM "${schema}"."${row.table_name}"`);
         rowCount = parseInt(countResult.rows[0]?.count || '0', 10);
-      } catch {
+      } catch (_e: any) {
         rowCount = undefined;
       }
     }

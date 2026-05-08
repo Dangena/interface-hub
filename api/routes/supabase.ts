@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import db from '../database.js';
+import { query } from '../database.js';
 import {
   DataSourceConfig,
   testConnection,
@@ -27,8 +27,8 @@ interface SupabaseProject {
   dbPassword: string;
 }
 
-router.get('/projects', (req, res) => {
-  const projects = db.prepare("SELECT * FROM database_connections WHERE type = 'supabase' ORDER BY created_at DESC").all();
+router.get('/projects', async (req, res) => {
+  const projects = (await query("SELECT * FROM database_connections WHERE type = 'supabase' ORDER BY created_at DESC")).rows;
   const safeProjects = projects.map((p: any) => ({
     ...p,
     password: p.password ? '••••••••' : null,
@@ -47,10 +47,10 @@ router.post('/connect', async (req, res) => {
   const id = uuidv4();
   const now = new Date().toISOString();
 
-  db.prepare(`
+  await query(`
     INSERT INTO database_connections (id, name, type, host, port, database_name, username, password, path, created_at)
-    VALUES (?, ?, 'supabase', ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, name, dbHost, dbPort || 5432, dbName, dbUser, dbPassword, 'public', now);
+    VALUES ($1, $2, 'supabase', $3, $4, $5, $6, $7, $8, $9)
+  `, [id, name, dbHost, dbPort || 5432, dbName, dbUser, dbPassword, 'public', now]);
 
   const config: DataSourceConfig = {
     id,
@@ -77,7 +77,7 @@ router.post('/connect', async (req, res) => {
 
 router.get('/:id/tables', async (req, res) => {
   const { id } = req.params;
-  const source = db.prepare('SELECT * FROM database_connections WHERE id = ? AND type = ?').get(id, 'supabase') as any;
+  const source = (await query('SELECT * FROM database_connections WHERE id = $1 AND type = $2', [id, 'supabase'])).rows[0] as any;
 
   if (!source) {
     res.status(404).json({ error: 'Supabase project not found' });
@@ -109,7 +109,7 @@ router.get('/:id/rest-api/:tableName', async (req, res) => {
   const { id, tableName } = req.params;
   const { select, filter, order, limit, offset } = req.query;
 
-  const source = db.prepare('SELECT * FROM database_connections WHERE id = ? AND type = ?').get(id, 'supabase') as any;
+  const source = (await query('SELECT * FROM database_connections WHERE id = $1 AND type = $2', [id, 'supabase'])).rows[0] as any;
   if (!source) {
     res.status(404).json({ error: 'Supabase project not found' });
     return;
@@ -172,7 +172,7 @@ router.get('/:id/rest-api/:tableName', async (req, res) => {
 router.post('/:id/rest-api/:tableName', async (req, res) => {
   const { id, tableName } = req.params;
 
-  const source = db.prepare('SELECT * FROM database_connections WHERE id = ? AND type = ?').get(id, 'supabase') as any;
+  const source = (await query('SELECT * FROM database_connections WHERE id = $1 AND type = $2', [id, 'supabase'])).rows[0] as any;
   if (!source) {
     res.status(404).json({ error: 'Supabase project not found' });
     return;
@@ -208,7 +208,7 @@ router.patch('/:id/rest-api/:tableName', async (req, res) => {
     return;
   }
 
-  const source = db.prepare('SELECT * FROM database_connections WHERE id = ? AND type = ?').get(id, 'supabase') as any;
+  const source = (await query('SELECT * FROM database_connections WHERE id = $1 AND type = $2', [id, 'supabase'])).rows[0] as any;
   if (!source) {
     res.status(404).json({ error: 'Supabase project not found' });
     return;
@@ -244,7 +244,7 @@ router.delete('/:id/rest-api/:tableName', async (req, res) => {
     return;
   }
 
-  const source = db.prepare('SELECT * FROM database_connections WHERE id = ? AND type = ?').get(id, 'supabase') as any;
+  const source = (await query('SELECT * FROM database_connections WHERE id = $1 AND type = $2', [id, 'supabase'])).rows[0] as any;
   if (!source) {
     res.status(404).json({ error: 'Supabase project not found' });
     return;
@@ -273,7 +273,7 @@ router.delete('/:id/rest-api/:tableName', async (req, res) => {
 
 router.get('/:id/rpc/:functionName', async (req, res) => {
   const { id, functionName } = req.params;
-  const source = db.prepare('SELECT * FROM database_connections WHERE id = ? AND type = ?').get(id, 'supabase') as any;
+  const source = (await query('SELECT * FROM database_connections WHERE id = $1 AND type = $2', [id, 'supabase'])).rows[0] as any;
 
   if (!source) {
     res.status(404).json({ error: 'Supabase project not found' });

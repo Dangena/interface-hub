@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import db from '../database.js';
+import { query } from '../database.js';
 import {
   DataSourceConfig,
   testConnection,
@@ -19,8 +19,8 @@ import {
 
 const router = Router();
 
-router.get('/sources', (req, res) => {
-  const sources = db.prepare('SELECT * FROM database_connections ORDER BY created_at DESC').all();
+router.get('/sources', async (req, res) => {
+  const sources = (await query('SELECT * FROM database_connections ORDER BY created_at DESC')).rows;
   const safeSources = sources.map((s: any) => ({
     ...s,
     password: s.password ? '••••••••' : null,
@@ -28,7 +28,7 @@ router.get('/sources', (req, res) => {
   res.json(safeSources);
 });
 
-router.post('/sources', (req, res) => {
+router.post('/sources', async (req, res) => {
   const { name, type, host, port, database_name, username, password, schema, ssl } = req.body;
 
   if (!name || !type || !host) {
@@ -39,22 +39,22 @@ router.post('/sources', (req, res) => {
   const id = uuidv4();
   const now = new Date().toISOString();
 
-  db.prepare(`
+  await query(`
     INSERT INTO database_connections (id, name, type, host, port, database_name, username, password, path, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, name, type, host, port || 5432, database_name, username, password, schema || 'public', now);
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+  `, [id, name, type, host, port || 5432, database_name, username, password, schema || 'public', now]);
 
-  const source = db.prepare('SELECT * FROM database_connections WHERE id = ?').get(id);
+  const source = (await query('SELECT * FROM database_connections WHERE id = $1', [id])).rows[0];
   const safeSource = { ...(source as any), password: '••••••••' };
   res.status(201).json(safeSource);
 });
 
-router.put('/sources/:id', (req, res) => {
+router.put('/sources/:id', async (req, res) => {
   const { id } = req.params;
   const { name, type, host, port, database_name, username, password, schema, ssl } = req.body;
   const now = new Date().toISOString();
 
-  const existing = db.prepare('SELECT * FROM database_connections WHERE id = ?').get(id) as any;
+  const existing = (await query('SELECT * FROM database_connections WHERE id = $1', [id])).rows[0] as any;
   if (!existing) {
     res.status(404).json({ error: 'Data source not found' });
     return;
@@ -62,30 +62,30 @@ router.put('/sources/:id', (req, res) => {
 
   const updatedPassword = password && password !== '••••••••' ? password : existing.password;
 
-  db.prepare(`
-    UPDATE database_connections SET name = ?, type = ?, host = ?, port = ?, database_name = ?,
-    username = ?, password = ?, path = ?, created_at = ?
-    WHERE id = ?
-  `).run(name || existing.name, type || existing.type, host || existing.host,
+  await query(`
+    UPDATE database_connections SET name = $1, type = $2, host = $3, port = $4, database_name = $5,
+    username = $6, password = $7, path = $8, created_at = $9
+    WHERE id = $10
+  `, [name || existing.name, type || existing.type, host || existing.host,
     port || existing.port, database_name || existing.database_name,
-    username || existing.username, updatedPassword, schema || existing.path, now, id);
+    username || existing.username, updatedPassword, schema || existing.path, now, id]);
 
   closePool(id);
 
-  const source = db.prepare('SELECT * FROM database_connections WHERE id = ?').get(id);
+  const source = (await query('SELECT * FROM database_connections WHERE id = $1', [id])).rows[0];
   res.json({ ...(source as any), password: '••••••••' });
 });
 
-router.delete('/sources/:id', (req, res) => {
+router.delete('/sources/:id', async (req, res) => {
   const { id } = req.params;
   closePool(id);
-  db.prepare('DELETE FROM database_connections WHERE id = ?').run(id);
+  await query('DELETE FROM database_connections WHERE id = $1', [id]);
   res.json({ success: true });
 });
 
 router.post('/sources/:id/test', async (req, res) => {
   const { id } = req.params;
-  const source = db.prepare('SELECT * FROM database_connections WHERE id = ?').get(id) as any;
+  const source = (await query('SELECT * FROM database_connections WHERE id = $1', [id])).rows[0] as any;
 
   if (!source) {
     res.status(404).json({ error: 'Data source not found' });
@@ -111,7 +111,7 @@ router.post('/sources/:id/test', async (req, res) => {
 
 router.get('/sources/:id/tables', async (req, res) => {
   const { id } = req.params;
-  const source = db.prepare('SELECT * FROM database_connections WHERE id = ?').get(id) as any;
+  const source = (await query('SELECT * FROM database_connections WHERE id = $1', [id])).rows[0] as any;
 
   if (!source) {
     res.status(404).json({ error: 'Data source not found' });
@@ -141,7 +141,7 @@ router.get('/sources/:id/tables', async (req, res) => {
 
 router.get('/sources/:id/tables/:tableName', async (req, res) => {
   const { id, tableName } = req.params;
-  const source = db.prepare('SELECT * FROM database_connections WHERE id = ?').get(id) as any;
+  const source = (await query('SELECT * FROM database_connections WHERE id = $1', [id])).rows[0] as any;
 
   if (!source) {
     res.status(404).json({ error: 'Data source not found' });
@@ -173,7 +173,7 @@ router.get('/sources/:id/tables/:tableName/data', async (req, res) => {
   const { id, tableName } = req.params;
   const { page, pageSize, where, orderBy, orderDir, schema } = req.query;
 
-  const source = db.prepare('SELECT * FROM database_connections WHERE id = ?').get(id) as any;
+  const source = (await query('SELECT * FROM database_connections WHERE id = $1', [id])).rows[0] as any;
   if (!source) {
     res.status(404).json({ error: 'Data source not found' });
     return;
@@ -209,7 +209,7 @@ router.get('/sources/:id/tables/:tableName/data', async (req, res) => {
 
 router.post('/sources/:id/tables/:tableName/data', async (req, res) => {
   const { id, tableName } = req.params;
-  const source = db.prepare('SELECT * FROM database_connections WHERE id = ?').get(id) as any;
+  const source = (await query('SELECT * FROM database_connections WHERE id = $1', [id])).rows[0] as any;
 
   if (!source) {
     res.status(404).json({ error: 'Data source not found' });
@@ -240,7 +240,7 @@ router.post('/sources/:id/tables/:tableName/data', async (req, res) => {
 router.put('/sources/:id/tables/:tableName/data/:pkValue', async (req, res) => {
   const { id, tableName, pkValue } = req.params;
   const { pkColumn } = req.body;
-  const source = db.prepare('SELECT * FROM database_connections WHERE id = ?').get(id) as any;
+  const source = (await query('SELECT * FROM database_connections WHERE id = $1', [id])).rows[0] as any;
 
   if (!source) {
     res.status(404).json({ error: 'Data source not found' });
@@ -272,7 +272,7 @@ router.put('/sources/:id/tables/:tableName/data/:pkValue', async (req, res) => {
 router.delete('/sources/:id/tables/:tableName/data/:pkValue', async (req, res) => {
   const { id, tableName, pkValue } = req.params;
   const { pkColumn } = req.query;
-  const source = db.prepare('SELECT * FROM database_connections WHERE id = ?').get(id) as any;
+  const source = (await query('SELECT * FROM database_connections WHERE id = $1', [id])).rows[0] as any;
 
   if (!source) {
     res.status(404).json({ error: 'Data source not found' });
@@ -309,7 +309,7 @@ router.post('/sources/:id/query', async (req, res) => {
     return;
   }
 
-  const source = db.prepare('SELECT * FROM database_connections WHERE id = ?').get(id) as any;
+  const source = (await query('SELECT * FROM database_connections WHERE id = $1', [id])).rows[0] as any;
   if (!source) {
     res.status(404).json({ error: 'Data source not found' });
     return;
@@ -338,7 +338,7 @@ router.post('/sources/:id/query', async (req, res) => {
 
 router.get('/sources/:id/crud-apis', async (req, res) => {
   const { id } = req.params;
-  const source = db.prepare('SELECT * FROM database_connections WHERE id = ?').get(id) as any;
+  const source = (await query('SELECT * FROM database_connections WHERE id = $1', [id])).rows[0] as any;
 
   if (!source) {
     res.status(404).json({ error: 'Data source not found' });
@@ -374,7 +374,7 @@ router.get('/sources/:id/crud-apis', async (req, res) => {
 
 router.get('/sources/:id/graphql-schema', async (req, res) => {
   const { id } = req.params;
-  const source = db.prepare('SELECT * FROM database_connections WHERE id = ?').get(id) as any;
+  const source = (await query('SELECT * FROM database_connections WHERE id = $1', [id])).rows[0] as any;
 
   if (!source) {
     res.status(404).json({ error: 'Data source not found' });
@@ -423,14 +423,14 @@ router.get('/sources/:id/graphql-schema', async (req, res) => {
 
 router.post('/sources/:id/graphql', async (req, res) => {
   const { id } = req.params;
-  const { query, variables } = req.body;
+  const { query: gqlQuery, variables } = req.body;
 
-  if (!query) {
+  if (!gqlQuery) {
     res.status(400).json({ error: 'GraphQL query is required' });
     return;
   }
 
-  const source = db.prepare('SELECT * FROM database_connections WHERE id = ?').get(id) as any;
+  const source = (await query('SELECT * FROM database_connections WHERE id = $1', [id])).rows[0] as any;
   if (!source) {
     res.status(404).json({ error: 'Data source not found' });
     return;
@@ -451,7 +451,7 @@ router.post('/sources/:id/graphql', async (req, res) => {
 
   try {
     const pool = getPool(config);
-    const result = await pool.query(query, variables);
+    const result = await pool.query(gqlQuery, variables);
     res.json({ data: result.rows });
   } catch (error) {
     res.status(500).json({

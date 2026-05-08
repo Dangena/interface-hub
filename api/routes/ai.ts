@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import db from '../database';
+import { query } from '../database.js';
 
 const router = Router();
 
@@ -34,11 +34,11 @@ interface ParameterData {
   example: string;
 }
 
-function resolveInterface(body: any): { iface: InterfaceData | null; params: ParameterData[] } {
+async function resolveInterface(body: any): Promise<{ iface: InterfaceData | null; params: ParameterData[] }> {
   if (body.interfaceId) {
-    const iface = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(body.interfaceId) as InterfaceData | undefined;
+    const iface = (await query('SELECT * FROM interfaces WHERE id = $1', [body.interfaceId])).rows[0] as InterfaceData | undefined;
     if (!iface) return { iface: null, params: [] };
-    const params = db.prepare('SELECT * FROM parameters WHERE interface_id = ?').all(body.interfaceId) as ParameterData[];
+    const params = (await query('SELECT * FROM parameters WHERE interface_id = $1', [body.interfaceId])).rows as ParameterData[];
     return { iface, params };
   }
   if (body.interface) {
@@ -78,14 +78,14 @@ function parseSchema(schemaStr: string | null): any {
   if (!schemaStr) return null;
   try {
     return JSON.parse(schemaStr);
-  } catch {
+  } catch (_e: any) {
     return null;
   }
 }
 
-router.post('/generate-doc', (req, res) => {
+router.post('/generate-doc', async (req, res) => {
   try {
-    const { iface, params } = resolveInterface(req.body);
+    const { iface, params } = await resolveInterface(req.body);
     if (!iface) {
       return res.status(400).json({ error: 'interfaceId or interface object is required' });
     }
@@ -172,9 +172,9 @@ router.post('/generate-doc', (req, res) => {
   }
 });
 
-router.post('/generate-test', (req, res) => {
+router.post('/generate-test', async (req, res) => {
   try {
-    const { iface, params } = resolveInterface(req.body);
+    const { iface, params } = await resolveInterface(req.body);
     if (!iface) {
       return res.status(400).json({ error: 'interfaceId or interface object is required' });
     }
@@ -498,7 +498,7 @@ function generateExampleValue(type: string, name: string): any {
   return 'sample_value';
 }
 
-router.post('/generate-mock', (req, res) => {
+router.post('/generate-mock', async (req, res) => {
   try {
     const { schema, interfaceId, count = 1 } = req.body;
 
@@ -506,7 +506,7 @@ router.post('/generate-mock', (req, res) => {
     let iface: InterfaceData | null = null;
 
     if (!resolvedSchema && interfaceId) {
-      const dbIface = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(interfaceId) as InterfaceData | undefined;
+      const dbIface = (await query('SELECT * FROM interfaces WHERE id = $1', [interfaceId])).rows[0] as InterfaceData | undefined;
       if (!dbIface) {
         return res.status(404).json({ error: 'Interface not found' });
       }
@@ -798,7 +798,7 @@ function inferPathParamExample(name: string): any {
   return 'sample_value';
 }
 
-router.post('/analyze', (req, res) => {
+router.post('/analyze', async (req, res) => {
   try {
     const { interfaces } = req.body;
     if (!interfaces || !Array.isArray(interfaces) || interfaces.length === 0) {
@@ -809,9 +809,9 @@ router.post('/analyze', (req, res) => {
 
     for (const item of interfaces) {
       if (typeof item === 'string') {
-        const dbIface = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(item) as InterfaceData | undefined;
+        const dbIface = (await query('SELECT * FROM interfaces WHERE id = $1', [item])).rows[0] as InterfaceData | undefined;
         if (dbIface) {
-          const params = db.prepare('SELECT * FROM parameters WHERE interface_id = ?').all(item) as ParameterData[];
+          const params = (await query('SELECT * FROM parameters WHERE interface_id = $1', [item])).rows as ParameterData[];
           resolvedInterfaces.push({ ...dbIface, parameters: params, tags: dbIface.tags ? JSON.parse(dbIface.tags) : [] });
         }
       } else {
@@ -1161,7 +1161,7 @@ router.post('/analyze', (req, res) => {
   }
 });
 
-router.post('/chat', (req, res) => {
+router.post('/chat', async (req, res) => {
   try {
     const { message, context } = req.body;
     if (!message || typeof message !== 'string') {
@@ -1381,9 +1381,9 @@ router.post('/chat', (req, res) => {
         `- Export interfaces as OpenAPI via /api/openapi/export`;
       relatedTopics = ['documentation', 'rest', 'import'];
     } else if (lowerMsg.includes('how many') && (lowerMsg.includes('interface') || lowerMsg.includes('api'))) {
-      const total = db.prepare('SELECT COUNT(*) as count FROM interfaces').get() as any;
-      const byMethod = db.prepare('SELECT method, COUNT(*) as count FROM interfaces GROUP BY method').all() as any[];
-      const byStatus = db.prepare('SELECT status, COUNT(*) as count FROM interfaces GROUP BY status').all() as any[];
+      const total = (await query('SELECT COUNT(*) as count FROM interfaces')).rows[0] as any;
+      const byMethod = (await query('SELECT method, COUNT(*) as count FROM interfaces GROUP BY method')).rows as any[];
+      const byStatus = (await query('SELECT status, COUNT(*) as count FROM interfaces GROUP BY status')).rows as any[];
       response = `You currently have **${total.count} interfaces** in your project.\n\n` +
         `**By Method:**\n` +
         byMethod.map(m => `- ${m.method}: ${m.count}`).join('\n') + '\n\n' +
@@ -1469,13 +1469,13 @@ router.post('/chat', (req, res) => {
 
     if (context && typeof context === 'object') {
       if (context.interfaceId) {
-        const iface = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(context.interfaceId) as InterfaceData | undefined;
+        const iface = (await query('SELECT * FROM interfaces WHERE id = $1', [context.interfaceId])).rows[0] as InterfaceData | undefined;
         if (iface) {
           response += `\n\n---\n*Context: You're asking about interface "${iface.name}" (${iface.method} ${iface.path})*`;
         }
       }
       if (context.projectName) {
-        const projectInterfaces = db.prepare('SELECT COUNT(*) as count FROM interfaces WHERE category = ?').get(context.projectName) as any;
+        const projectInterfaces = (await query('SELECT COUNT(*) as count FROM interfaces WHERE category = $1', [context.projectName])).rows[0] as any;
         if (projectInterfaces.count > 0) {
           response += `\n\n*Context: Project "${context.projectName}" has ${projectInterfaces.count} interfaces.*`;
         }

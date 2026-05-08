@@ -1,10 +1,10 @@
 import { Router, Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import db from '../database.js';
+import { query } from '../database.js';
 
 const router = Router();
 
-router.get('/apis', (req: Request, res: Response) => {
+router.get('/apis', async (req: Request, res: Response) => {
   try {
     const {
       search = '',
@@ -21,23 +21,27 @@ router.get('/apis', (req: Request, res: Response) => {
 
     let where = "WHERE i.status = 'published'";
     const params: any[] = [];
+    let paramIndex = 1;
 
     if (search) {
-      where += " AND (i.name LIKE ? OR i.description LIKE ? OR i.path LIKE ?)";
+      where += ` AND (i.name LIKE $${paramIndex} OR i.description LIKE $${paramIndex + 1} OR i.path LIKE $${paramIndex + 2})`;
       const term = `%${search}%`;
       params.push(term, term, term);
+      paramIndex += 3;
     }
 
     if (category) {
-      where += ' AND i.category = ?';
+      where += ` AND i.category = $${paramIndex}`;
       params.push(category);
+      paramIndex++;
     }
 
     if (tags) {
       const tagList = (tags as string).split(',').map(t => t.trim()).filter(Boolean);
       for (const tag of tagList) {
-        where += ' AND i.tags LIKE ?';
+        where += ` AND i.tags LIKE $${paramIndex}`;
         params.push(`%"${tag}"%`);
+        paramIndex++;
       }
     }
 
@@ -48,25 +52,27 @@ router.get('/apis', (req: Request, res: Response) => {
       orderBy = 'i.name ASC';
     }
 
-    const countRow = db.prepare(
-      `SELECT COUNT(*) as total FROM interfaces i ${where}`
-    ).get(...params) as { total: number };
+    const countRow = (await query(
+      `SELECT COUNT(*) as total FROM interfaces i ${where}`,
+      params
+    )).rows[0] as { total: number };
 
-    const rows = db.prepare(
+    const rows = (await query(
       `SELECT i.*, COUNT(l.id) as call_count
        FROM interfaces i
        LEFT JOIN api_logs l ON l.interface_id = i.id
        ${where}
        GROUP BY i.id
        ORDER BY ${orderBy}
-       LIMIT ? OFFSET ?`
-    ).all(...params, pageSizeNum, offset) as any[];
+       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
+      [...params, pageSizeNum, offset]
+    )).rows as any[];
 
     const apis = rows.map(row => {
       let parsedTags: string[] = [];
       try {
         parsedTags = JSON.parse(row.tags || '[]');
-      } catch {
+      } catch (_e: any) {
         parsedTags = [];
       }
       return {
@@ -100,14 +106,15 @@ router.get('/apis', (req: Request, res: Response) => {
   }
 });
 
-router.get('/apis/:id', (req: Request, res: Response) => {
+router.get('/apis/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const userId = req.query.userId as string;
 
-    const row = db.prepare(
-      `SELECT i.* FROM interfaces i WHERE i.id = ? AND i.status = 'published'`
-    ).get(id) as any;
+    const row = (await query(
+      `SELECT i.* FROM interfaces i WHERE i.id = $1 AND i.status = 'published'`,
+      [id]
+    )).rows[0] as any;
 
     if (!row) {
       return res.status(404).json({ error: 'API not found' });
@@ -116,38 +123,42 @@ router.get('/apis/:id', (req: Request, res: Response) => {
     let parsedTags: string[] = [];
     try {
       parsedTags = JSON.parse(row.tags || '[]');
-    } catch {
+    } catch (_e: any) {
       parsedTags = [];
     }
 
-    const usageStats = db.prepare(
+    const usageStats = (await query(
       `SELECT
          COUNT(*) as totalCalls,
          AVG(response_time) as avgResponseTime,
          SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) as errorCount,
          MAX(created_at) as lastCalledAt
-       FROM api_logs WHERE interface_id = ?`
-    ).get(id) as any;
+       FROM api_logs WHERE interface_id = $1`,
+      [id]
+    )).rows[0] as any;
 
-    const relatedApis = db.prepare(
+    const relatedApis = (await query(
       `SELECT i.id, i.name, i.path, i.method, i.description, i.category
        FROM interfaces i
-       WHERE i.category = ? AND i.id != ? AND i.status = 'published'
-       LIMIT 5`
-    ).all(row.category, id) as any[];
+       WHERE i.category = $1 AND i.id != $2 AND i.status = 'published'
+       LIMIT 5`,
+      [row.category, id]
+    )).rows as any[];
 
-    const reviewStats = db.prepare(
+    const reviewStats = (await query(
       `SELECT
          COALESCE(AVG(rating), 0) as avgRating,
          COUNT(*) as reviewCount
-       FROM api_reviews WHERE interface_id = ?`
-    ).get(id) as { avgRating: number; reviewCount: number };
+       FROM api_reviews WHERE interface_id = $1`,
+      [id]
+    )).rows[0] as { avgRating: number; reviewCount: number };
 
     let isFavorited = false;
     if (userId) {
-      const fav = db.prepare(
-        `SELECT id FROM api_favorites WHERE user_id = ? AND interface_id = ?`
-      ).get(userId, id);
+      const fav = (await query(
+        `SELECT id FROM api_favorites WHERE user_id = $1 AND interface_id = $2`,
+        [userId, id]
+      )).rows[0];
       isFavorited = !!fav;
     }
 
@@ -182,7 +193,7 @@ router.get('/apis/:id', (req: Request, res: Response) => {
   }
 });
 
-router.post('/apis/:id/favorite', (req: Request, res: Response) => {
+router.post('/apis/:id/favorite', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { userId } = req.body;
@@ -191,27 +202,31 @@ router.post('/apis/:id/favorite', (req: Request, res: Response) => {
       return res.status(400).json({ error: 'userId is required' });
     }
 
-    const api = db.prepare(
-      `SELECT id FROM interfaces WHERE id = ? AND status = 'published'`
-    ).get(id);
+    const api = (await query(
+      `SELECT id FROM interfaces WHERE id = $1 AND status = 'published'`,
+      [id]
+    )).rows[0];
 
     if (!api) {
       return res.status(404).json({ error: 'API not found' });
     }
 
-    const existing = db.prepare(
-      `SELECT id FROM api_favorites WHERE user_id = ? AND interface_id = ?`
-    ).get(userId, id);
+    const existing = (await query(
+      `SELECT id FROM api_favorites WHERE user_id = $1 AND interface_id = $2`,
+      [userId, id]
+    )).rows[0];
 
     if (existing) {
-      db.prepare(
-        `DELETE FROM api_favorites WHERE user_id = ? AND interface_id = ?`
-      ).run(userId, id);
+      await query(
+        `DELETE FROM api_favorites WHERE user_id = $1 AND interface_id = $2`,
+        [userId, id]
+      );
       res.json({ favorited: false });
     } else {
-      db.prepare(
-        `INSERT INTO api_favorites (id, user_id, interface_id) VALUES (?, ?, ?)`
-      ).run(uuidv4(), userId, id);
+      await query(
+        `INSERT INTO api_favorites (id, user_id, interface_id) VALUES ($1, $2, $3)`,
+        [uuidv4(), userId, id]
+      );
       res.json({ favorited: true });
     }
   } catch (error) {
@@ -219,15 +234,15 @@ router.post('/apis/:id/favorite', (req: Request, res: Response) => {
   }
 });
 
-router.get('/categories', (_req: Request, res: Response) => {
+router.get('/categories', async (_req: Request, res: Response) => {
   try {
-    const rows = db.prepare(
+    const rows = (await query(
       `SELECT category, COUNT(*) as api_count
        FROM interfaces
        WHERE status = 'published' AND category IS NOT NULL AND category != ''
        GROUP BY category
        ORDER BY api_count DESC`
-    ).all() as any[];
+    )).rows as any[];
 
     res.json(rows.map(row => ({
       category: row.category,
@@ -238,11 +253,11 @@ router.get('/categories', (_req: Request, res: Response) => {
   }
 });
 
-router.get('/tags', (_req: Request, res: Response) => {
+router.get('/tags', async (_req: Request, res: Response) => {
   try {
-    const rows = db.prepare(
+    const rows = (await query(
       `SELECT tags FROM interfaces WHERE status = 'published' AND tags IS NOT NULL`
-    ).all() as any[];
+    )).rows as any[];
 
     const tagCounts = new Map<string, number>();
     for (const row of rows) {
@@ -251,7 +266,7 @@ router.get('/tags', (_req: Request, res: Response) => {
         for (const tag of parsed) {
           tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1);
         }
-      } catch {
+      } catch (_e: any) {
         continue;
       }
     }
@@ -266,26 +281,27 @@ router.get('/tags', (_req: Request, res: Response) => {
   }
 });
 
-router.get('/trending', (req: Request, res: Response) => {
+router.get('/trending', async (req: Request, res: Response) => {
   try {
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit as string, 10) || 10));
 
-    const rows = db.prepare(
+    const rows = (await query(
       `SELECT i.*, COUNT(l.id) as call_count
        FROM interfaces i
        INNER JOIN api_logs l ON l.interface_id = i.id
        WHERE i.status = 'published'
-         AND l.created_at >= datetime('now', '-7 days')
+         AND l.created_at >= NOW() - INTERVAL '7 days'
        GROUP BY i.id
        ORDER BY call_count DESC
-       LIMIT ?`
-    ).all(limit) as any[];
+       LIMIT $1`,
+      [limit]
+    )).rows as any[];
 
     const trending = rows.map(row => {
       let parsedTags: string[] = [];
       try {
         parsedTags = JSON.parse(row.tags || '[]');
-      } catch {
+      } catch (_e: any) {
         parsedTags = [];
       }
       return {
@@ -306,24 +322,25 @@ router.get('/trending', (req: Request, res: Response) => {
   }
 });
 
-router.get('/recommended', (req: Request, res: Response) => {
+router.get('/recommended', async (req: Request, res: Response) => {
   try {
     const userId = req.query.userId as string;
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit as string, 10) || 10));
 
     if (!userId) {
-      const rows = db.prepare(
+      const rows = (await query(
         `SELECT i.* FROM interfaces i
          WHERE i.status = 'published'
          ORDER BY i.created_at DESC
-         LIMIT ?`
-      ).all(limit) as any[];
+         LIMIT $1`,
+        [limit]
+      )).rows as any[];
 
       const apis = rows.map(row => {
         let parsedTags: string[] = [];
         try {
           parsedTags = JSON.parse(row.tags || '[]');
-        } catch {
+        } catch (_e: any) {
           parsedTags = [];
         }
         return {
@@ -340,7 +357,7 @@ router.get('/recommended', (req: Request, res: Response) => {
       return res.json(apis);
     }
 
-    const userLogs = db.prepare(
+    const userLogs = (await query(
       `SELECT DISTINCT l.interface_id, i.category, i.tags
        FROM api_logs l
        INNER JOIN interfaces i ON i.id = l.interface_id
@@ -352,7 +369,7 @@ router.get('/recommended', (req: Request, res: Response) => {
          LIMIT 50
        )
        AND i.status = 'published'`
-    ).all() as any[];
+    )).rows as any[];
 
     const usedCategories = new Set<string>();
     const usedTags = new Set<string>();
@@ -364,15 +381,15 @@ router.get('/recommended', (req: Request, res: Response) => {
       try {
         const parsed: string[] = JSON.parse(log.tags || '[]');
         for (const tag of parsed) usedTags.add(tag);
-      } catch {
+      } catch (_e: any) {
         continue;
       }
     }
 
-    const rows = db.prepare(
+    const rows = (await query(
       `SELECT i.* FROM interfaces i
        WHERE i.status = 'published'`
-    ).all() as any[];
+    )).rows as any[];
 
     const scored = rows
       .filter(row => !usedApiIds.has(row.id))
@@ -384,7 +401,7 @@ router.get('/recommended', (req: Request, res: Response) => {
           for (const tag of parsed) {
             if (usedTags.has(tag)) score += 1;
           }
-        } catch {
+        } catch (_e: any) {
           // no score from tags
         }
         return { row, score };
@@ -396,7 +413,7 @@ router.get('/recommended', (req: Request, res: Response) => {
       let parsedTags: string[] = [];
       try {
         parsedTags = JSON.parse(row.tags || '[]');
-      } catch {
+      } catch (_e: any) {
         parsedTags = [];
       }
       return {
@@ -416,7 +433,7 @@ router.get('/recommended', (req: Request, res: Response) => {
   }
 });
 
-router.post('/apis/:id/review', (req: Request, res: Response) => {
+router.post('/apis/:id/review', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { userId, userName, rating, comment } = req.body;
@@ -429,9 +446,10 @@ router.post('/apis/:id/review', (req: Request, res: Response) => {
       return res.status(400).json({ error: 'rating must be between 1 and 5' });
     }
 
-    const api = db.prepare(
-      `SELECT id FROM interfaces WHERE id = ? AND status = 'published'`
-    ).get(id);
+    const api = (await query(
+      `SELECT id FROM interfaces WHERE id = $1 AND status = 'published'`,
+      [id]
+    )).rows[0];
 
     if (!api) {
       return res.status(404).json({ error: 'API not found' });
@@ -440,10 +458,11 @@ router.post('/apis/:id/review', (req: Request, res: Response) => {
     const reviewId = uuidv4();
     const roundedRating = Math.round(rating);
 
-    db.prepare(
+    await query(
       `INSERT INTO api_reviews (id, interface_id, user_id, user_name, rating, comment)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    ).run(reviewId, id, userId, userName || null, roundedRating, comment || null);
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [reviewId, id, userId, userName || null, roundedRating, comment || null]
+    );
 
     res.status(201).json({
       id: reviewId,
@@ -459,18 +478,19 @@ router.post('/apis/:id/review', (req: Request, res: Response) => {
   }
 });
 
-router.get('/apis/:id/reviews', (req: Request, res: Response) => {
+router.get('/apis/:id/reviews', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
 
-    const apiReviews = db.prepare(
+    const apiReviews = (await query(
       `SELECT id, interface_id, user_id, user_name, rating, comment, created_at
        FROM api_reviews
-       WHERE interface_id = ?
-       ORDER BY created_at DESC`
-    ).all(id) as any[];
+       WHERE interface_id = $1
+       ORDER BY created_at DESC`,
+      [id]
+    )).rows as any[];
 
-    const summaryRow = db.prepare(
+    const summaryRow = (await query(
       `SELECT
          COUNT(*) as totalReviews,
          COALESCE(AVG(rating), 0) as avgRating,
@@ -480,8 +500,9 @@ router.get('/apis/:id/reviews', (req: Request, res: Response) => {
          SUM(CASE WHEN rating = 2 THEN 1 ELSE 0 END) as r2,
          SUM(CASE WHEN rating = 1 THEN 1 ELSE 0 END) as r1
        FROM api_reviews
-       WHERE interface_id = ?`
-    ).get(id) as any;
+       WHERE interface_id = $1`,
+      [id]
+    )).rows[0] as any;
 
     const reviewsList = apiReviews.map(r => ({
       id: r.id,

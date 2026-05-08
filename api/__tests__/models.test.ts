@@ -1,8 +1,8 @@
-import db from '../database';
+import { query } from '../database.js';
 
 describe('Models API', () => {
-  beforeAll(() => {
-    db.exec(`
+  beforeAll(async () => {
+    await query(`
       CREATE TABLE IF NOT EXISTS data_models (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -11,10 +11,10 @@ describe('Models API', () => {
         schema TEXT,
         created_at TEXT,
         updated_at TEXT
-      );
+      )
     `);
 
-    db.exec(`
+    await query(`
       CREATE TABLE IF NOT EXISTS fields (
         id TEXT PRIMARY KEY,
         model_name TEXT NOT NULL,
@@ -26,17 +26,17 @@ describe('Models API', () => {
         default_value TEXT,
         comment TEXT,
         FOREIGN KEY (model_name) REFERENCES data_models(name)
-      );
+      )
     `);
   });
 
-  test('should be able to query data models', () => {
-    const models = db.prepare('SELECT * FROM data_models LIMIT 10').all();
+  test('should be able to query data models', async () => {
+    const models = (await query('SELECT * FROM data_models LIMIT 10')).rows;
     expect(Array.isArray(models)).toBe(true);
   });
 
-  test('should have valid model structure', () => {
-    const models = db.prepare('SELECT * FROM data_models LIMIT 1').all();
+  test('should have valid model structure', async () => {
+    const models = (await query('SELECT * FROM data_models LIMIT 1')).rows;
     if (models.length > 0) {
       const model = models[0] as any;
       expect(model).toHaveProperty('name');
@@ -44,26 +44,26 @@ describe('Models API', () => {
     }
   });
 
-  test('should query model fields', () => {
-    const models = db.prepare('SELECT * FROM data_models LIMIT 1').all() as any[];
+  test('should query model fields', async () => {
+    const models = (await query('SELECT * FROM data_models LIMIT 1')).rows as any[];
     if (models.length > 0) {
-      const fields = db.prepare('SELECT * FROM fields WHERE model_name = ?').all(models[0].name);
+      const fields = (await query('SELECT * FROM fields WHERE model_name = $1', [models[0].name])).rows;
       expect(Array.isArray(fields)).toBe(true);
     }
   });
 
-  test('should identify primary key fields', () => {
-    const models = db.prepare('SELECT * FROM data_models LIMIT 1').all() as any[];
+  test('should identify primary key fields', async () => {
+    const models = (await query('SELECT * FROM data_models LIMIT 1')).rows as any[];
     if (models.length > 0) {
-      const pkFields = db.prepare('SELECT * FROM fields WHERE model_name = ? AND primary_key = 1').all(models[0].name);
+      const pkFields = (await query('SELECT * FROM fields WHERE model_name = $1 AND primary_key = 1', [models[0].name])).rows;
       expect(Array.isArray(pkFields)).toBe(true);
     }
   });
 
-  test('should check field nullability', () => {
-    const models = db.prepare('SELECT * FROM data_models LIMIT 1').all() as any[];
+  test('should check field nullability', async () => {
+    const models = (await query('SELECT * FROM data_models LIMIT 1')).rows as any[];
     if (models.length > 0) {
-      const fields = db.prepare('SELECT * FROM fields WHERE model_name = ?').all(models[0].name) as any[];
+      const fields = (await query('SELECT * FROM fields WHERE model_name = $1', [models[0].name])).rows as any[];
       fields.forEach(field => {
         expect(field).toHaveProperty('nullable');
         expect(typeof field.nullable).toBe('number');

@@ -1,6 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import db from '../database.js';
+import { pool, query } from '../database.js';
 
 export function tracingMiddleware(req: Request, res: Response, next: NextFunction): void {
   const startTime = Date.now();
@@ -25,27 +25,25 @@ export function tracingMiddleware(req: Request, res: Response, next: NextFunctio
     const userId = (req as any).user?.id || null;
     const ipAddress = req.ip || req.socket.remoteAddress || null;
 
-    try {
-      db.prepare(`
-        INSERT INTO traces (id, trace_id, span_id, parent_span_id, operation_name, service_name, method, path, status_code, duration, tags, logs, user_id, ip_address)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        uuidv4(),
-        traceId,
-        spanId,
-        null,
-        operationName,
-        'interface-hub',
-        req.method,
-        req.originalUrl,
-        res.statusCode,
-        duration,
-        tags,
-        logs,
-        userId,
-        ipAddress
-      );
-    } catch (_e) {}
+    query(`
+      INSERT INTO traces (id, trace_id, span_id, parent_span_id, operation_name, service_name, method, path, status_code, duration, tags, logs, user_id, ip_address)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+    `, [
+      uuidv4(),
+      traceId,
+      spanId,
+      null,
+      operationName,
+      'interface-hub',
+      req.method,
+      req.originalUrl,
+      res.statusCode,
+      duration,
+      tags,
+      logs,
+      userId,
+      ipAddress
+    ]).catch(() => {});
 
     return originalEnd.apply(res, args) as Response;
   } as any;
@@ -55,61 +53,63 @@ export function tracingMiddleware(req: Request, res: Response, next: NextFunctio
 
 const router = Router();
 
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   try {
     const { trace_id, method, path, status_code, start_time, end_time, limit = '50', offset = '0' } = req.query;
 
     let where = '1=1';
     const params: any[] = [];
+    let paramIdx = 1;
 
     if (trace_id) {
-      where += ' AND trace_id = ?';
+      where += ` AND trace_id = $${paramIdx++}`;
       params.push(trace_id);
     }
     if (method) {
-      where += ' AND method = ?';
+      where += ` AND method = $${paramIdx++}`;
       params.push(method);
     }
     if (path) {
-      where += ' AND path LIKE ?';
+      where += ` AND path LIKE $${paramIdx++}`;
       params.push(`%${path}%`);
     }
     if (status_code) {
-      where += ' AND status_code = ?';
+      where += ` AND status_code = $${paramIdx++}`;
       params.push(Number(status_code));
     }
     if (start_time) {
-      where += ' AND created_at >= ?';
+      where += ` AND created_at >= $${paramIdx++}`;
       params.push(start_time);
     }
     if (end_time) {
-      where += ' AND created_at <= ?';
+      where += ` AND created_at <= $${paramIdx++}`;
       params.push(end_time);
     }
 
     const limitVal = Math.min(Math.max(Number(limit), 1), 500);
     const offsetVal = Math.max(Number(offset), 0);
 
-    const rows = db.prepare(`
+    params.push(limitVal, offsetVal);
+    const rows = (await query(`
       SELECT trace_id,
              COUNT(*) as span_count,
              MIN(created_at) as started_at,
              MAX(created_at) as ended_at,
              SUM(duration) as total_duration,
-             GROUP_CONCAT(DISTINCT method) as methods,
-             GROUP_CONCAT(DISTINCT path) as paths
+             STRING_AGG(DISTINCT method, ',') as methods,
+             STRING_AGG(DISTINCT path, ',') as paths
       FROM traces
       WHERE ${where}
       GROUP BY trace_id
       ORDER BY MIN(created_at) DESC
-      LIMIT ? OFFSET ?
-    `).all(...params, limitVal, offsetVal) as any[];
+      LIMIT $${paramIdx++} OFFSET $${paramIdx++}
+    `, params)).rows as any[];
 
-    const totalResult = db.prepare(`
+    const totalResult = (await query(`
       SELECT COUNT(DISTINCT trace_id) as total
       FROM traces
       WHERE ${where}
-    `).get(...params) as any;
+    `, params.slice(0, -2))).rows[0] as any;
 
     res.json({
       traces: rows,
@@ -122,28 +122,28 @@ router.get('/', (req: Request, res: Response) => {
   }
 });
 
-router.get('/stats/summary', (_req: Request, res: Response) => {
+router.get('/stats/summary', async (_req: Request, res: Response) => {
   try {
-    const totalTraces = (db.prepare('SELECT COUNT(DISTINCT trace_id) as count FROM traces').get() as any).count;
+    const totalTraces = ((await query('SELECT COUNT(DISTINCT trace_id) as count FROM traces')).rows[0] as any).count;
 
-    const avgResult = db.prepare(`
+    const avgResult = (await query(`
       SELECT AVG(total_duration) as avg_duration
       FROM (
         SELECT SUM(duration) as total_duration
         FROM traces
         GROUP BY trace_id
       )
-    `).get() as any;
+    `)).rows[0] as any;
 
-    const errorResult = db.prepare(`
+    const errorResult = (await query(`
       SELECT COUNT(DISTINCT trace_id) as count
       FROM traces
       WHERE status_code >= 400
-    `).get() as any;
+    `)).rows[0] as any;
 
     const errorRate = totalTraces > 0 ? (errorResult.count / totalTraces) * 100 : 0;
 
-    const slowestTraces = db.prepare(`
+    const slowestTraces = (await query(`
       SELECT trace_id,
              SUM(duration) as total_duration,
              COUNT(*) as span_count,
@@ -152,7 +152,7 @@ router.get('/stats/summary', (_req: Request, res: Response) => {
       GROUP BY trace_id
       ORDER BY SUM(duration) DESC
       LIMIT 10
-    `).all() as any[];
+    `)).rows as any[];
 
     res.json({
       totalTraces,
@@ -165,15 +165,15 @@ router.get('/stats/summary', (_req: Request, res: Response) => {
   }
 });
 
-router.get('/:traceId', (req: Request, res: Response) => {
+router.get('/:traceId', async (req: Request, res: Response) => {
   try {
     const { traceId } = req.params;
 
-    const spans = db.prepare(`
+    const spans = (await query(`
       SELECT * FROM traces
-      WHERE trace_id = ?
+      WHERE trace_id = $1
       ORDER BY created_at ASC
-    `).all(traceId) as any[];
+    `, [traceId])).rows as any[];
 
     if (spans.length === 0) {
       res.status(404).json({ error: 'Trace not found' });
@@ -193,7 +193,7 @@ router.get('/:traceId', (req: Request, res: Response) => {
   }
 });
 
-router.delete('/', (req: Request, res: Response) => {
+router.delete('/', async (req: Request, res: Response) => {
   try {
     const { before } = req.query;
 
@@ -206,11 +206,11 @@ router.delete('/', (req: Request, res: Response) => {
       cutoffDate = date.toISOString();
     }
 
-    const result = db.prepare('DELETE FROM traces WHERE created_at < ?').run(cutoffDate);
+    const result = await query('DELETE FROM traces WHERE created_at < $1', [cutoffDate]);
 
     res.json({
       message: 'Old traces cleared successfully',
-      deletedCount: result.changes,
+      deletedCount: result.rowCount,
       cutoffDate,
     });
   } catch (error) {

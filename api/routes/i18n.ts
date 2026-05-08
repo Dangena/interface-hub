@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express';
-import db from '../database.js';
+import { pool, query } from '../database.js';
 import { randomUUID } from 'crypto';
 
 const router = Router();
@@ -309,16 +309,17 @@ function buildTranslationsFromRows(rows: Array<{ namespace: string; key: string;
   return result;
 }
 
-function getDbOverrides(locale: string): Translations {
-  const rows = db.prepare(
-    'SELECT namespace, key, value FROM i18n_translations WHERE locale = ?'
-  ).all(locale) as Array<{ namespace: string; key: string; value: string }>;
+async function getDbOverrides(locale: string): Promise<Translations> {
+  const rows = (await query(
+    'SELECT namespace, key, value FROM i18n_translations WHERE locale = $1',
+    [locale]
+  )).rows as Array<{ namespace: string; key: string; value: string }>;
   return buildTranslationsFromRows(rows);
 }
 
-function getTranslations(locale: string): Translations | null {
+async function getTranslations(locale: string): Promise<Translations | null> {
   const builtin = builtinLocales[locale];
-  const dbOverrides = getDbOverrides(locale);
+  const dbOverrides = await getDbOverrides(locale);
   if (!builtin && Object.keys(dbOverrides).length === 0) return null;
   if (!builtin) return dbOverrides;
   if (Object.keys(dbOverrides).length > 0) {
@@ -340,11 +341,11 @@ function collectKeys(obj: Translations, prefix: string = ''): string[] {
   return keys;
 }
 
-router.get('/locales', (req: Request, res: Response): void => {
+router.get('/locales', async (req: Request, res: Response): Promise<void> => {
   const builtinCodes = Object.keys(builtinLocales);
-  const customRows = db.prepare(
+  const customRows = (await query(
     'SELECT DISTINCT locale FROM i18n_translations'
-  ).all() as Array<{ locale: string }>;
+  )).rows as Array<{ locale: string }>;
   const customCodes = customRows.map((r) => r.locale).filter((c) => !builtinCodes.includes(c));
   const allCodes = [...builtinCodes, ...customCodes];
   const locales = allCodes.map((code) => ({
@@ -354,9 +355,9 @@ router.get('/locales', (req: Request, res: Response): void => {
   res.json({ locales });
 });
 
-router.get('/locales/:locale', (req: Request, res: Response): void => {
+router.get('/locales/:locale', async (req: Request, res: Response): Promise<void> => {
   const { locale } = req.params;
-  const translations = getTranslations(locale);
+  const translations = await getTranslations(locale);
   if (!translations) {
     res.status(404).json({ error: `Locale '${locale}' not found` });
     return;
@@ -364,36 +365,42 @@ router.get('/locales/:locale', (req: Request, res: Response): void => {
   res.json({ locale, translations });
 });
 
-router.post('/locales', (req: Request, res: Response): void => {
+router.post('/locales', async (req: Request, res: Response): Promise<void> => {
   const { locale, translations } = req.body;
   if (!locale || !translations || typeof translations !== 'object') {
     res.status(400).json({ error: 'locale and translations are required' });
     return;
   }
   const rows = flattenTranslations(translations);
-  const upsert = db.prepare(`
-    INSERT INTO i18n_translations (id, locale, namespace, key, value, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
-    ON CONFLICT(locale, namespace, key) DO UPDATE SET
-      value = excluded.value,
-      updated_at = datetime('now')
-  `);
-  const transaction = db.transaction(() => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
     for (const row of rows) {
-      upsert.run(randomUUID(), locale, row.namespace, row.key, row.value);
+      await client.query(`
+        INSERT INTO i18n_translations (id, locale, namespace, key, value, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+        ON CONFLICT (locale, namespace, key) DO UPDATE SET
+          value = EXCLUDED.value,
+          updated_at = NOW()
+      `, [randomUUID(), locale, row.namespace, row.key, row.value]);
     }
-  });
-  transaction();
-  const result = getTranslations(locale);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+  const result = await getTranslations(locale);
   res.json({ locale, translations: result });
 });
 
-router.get('/detect', (req: Request, res: Response): void => {
+router.get('/detect', async (req: Request, res: Response): Promise<void> => {
   const acceptLanguage = req.headers['accept-language'] || '';
   const builtinCodes = Object.keys(builtinLocales);
-  const customRows = db.prepare(
+  const customRows = (await query(
     'SELECT DISTINCT locale FROM i18n_translations'
-  ).all() as Array<{ locale: string }>;
+  )).rows as Array<{ locale: string }>;
   const customCodes = customRows.map((r) => r.locale);
   const supportedLocales = [...builtinCodes, ...customCodes];
   const parsed = parseAcceptLanguage(acceptLanguage);
@@ -414,13 +421,13 @@ router.get('/detect', (req: Request, res: Response): void => {
   res.json({ locale: detected, supportedLocales });
 });
 
-router.get('/locales/:locale/missing', (req: Request, res: Response): void => {
+router.get('/locales/:locale/missing', async (req: Request, res: Response): Promise<void> => {
   const { locale } = req.params;
   if (locale === 'zh-CN') {
     res.json({ locale, missingKeys: [] });
     return;
   }
-  const targetTranslations = getTranslations(locale);
+  const targetTranslations = await getTranslations(locale);
   if (!targetTranslations) {
     res.status(404).json({ error: `Locale '${locale}' not found` });
     return;

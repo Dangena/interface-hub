@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import db from '../database';
+import { query } from '../database.js';
 
 const router = Router();
 
@@ -41,7 +41,7 @@ function normalizeInterface(raw: Record<string, any>): Record<string, any> {
   if (typeof normalized.tags === 'string') {
     try {
       normalized.tags = JSON.parse(normalized.tags);
-    } catch {
+    } catch (_e: any) {
       normalized.tags = [];
     }
   }
@@ -49,7 +49,7 @@ function normalizeInterface(raw: Record<string, any>): Record<string, any> {
   if (typeof normalized.request_schema === 'string') {
     try {
       normalized.request_schema = JSON.parse(normalized.request_schema);
-    } catch {
+    } catch (_e: any) {
       normalized.request_schema = null;
     }
   }
@@ -57,7 +57,7 @@ function normalizeInterface(raw: Record<string, any>): Record<string, any> {
   if (typeof normalized.response_schema === 'string') {
     try {
       normalized.response_schema = JSON.parse(normalized.response_schema);
-    } catch {
+    } catch (_e: any) {
       normalized.response_schema = null;
     }
   }
@@ -84,7 +84,7 @@ router.post('/compare', (req, res) => {
   }
 });
 
-router.post('/compare-versions', (req, res) => {
+router.post('/compare-versions', async (req, res) => {
   try {
     const { interfaceId, version1, version2 } = req.body;
 
@@ -92,13 +92,13 @@ router.post('/compare-versions', (req, res) => {
       return res.status(400).json({ error: 'interfaceId, version1, and version2 are required' });
     }
 
-    const iface = db.prepare('SELECT id FROM interfaces WHERE id = ?').get(interfaceId);
+    const iface = (await query('SELECT id FROM interfaces WHERE id = $1', [interfaceId])).rows[0];
     if (!iface) {
       return res.status(404).json({ error: 'Interface not found' });
     }
 
-    const v1 = db.prepare('SELECT * FROM interface_versions WHERE interface_id = ? AND version = ? ORDER BY created_at DESC LIMIT 1').get(interfaceId, version1) as any;
-    const v2 = db.prepare('SELECT * FROM interface_versions WHERE interface_id = ? AND version = ? ORDER BY created_at DESC LIMIT 1').get(interfaceId, version2) as any;
+    const v1 = (await query('SELECT * FROM interface_versions WHERE interface_id = $1 AND version = $2 ORDER BY created_at DESC LIMIT 1', [interfaceId, version1])).rows[0] as any;
+    const v2 = (await query('SELECT * FROM interface_versions WHERE interface_id = $1 AND version = $2 ORDER BY created_at DESC LIMIT 1', [interfaceId, version2])).rows[0] as any;
 
     if (!v1) {
       return res.status(404).json({ error: `Version "${version1}" not found` });
@@ -123,7 +123,7 @@ router.post('/compare-versions', (req, res) => {
   }
 });
 
-router.get('/interface/:id/history', (req, res) => {
+router.get('/interface/:id/history', async (req, res) => {
   try {
     const { id } = req.params;
     const { page = '1', limit = '20' } = req.query;
@@ -131,16 +131,17 @@ router.get('/interface/:id/history', (req, res) => {
     const limitNum = Math.min(100, Math.max(1, parseInt(limit as string) || 20));
     const offset = (pageNum - 1) * limitNum;
 
-    const iface = db.prepare('SELECT id FROM interfaces WHERE id = ?').get(id);
+    const iface = (await query('SELECT id FROM interfaces WHERE id = $1', [id])).rows[0];
     if (!iface) {
       return res.status(404).json({ error: 'Interface not found' });
     }
 
-    const history = db.prepare(
-      'SELECT * FROM change_history WHERE interface_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?'
-    ).all(id, limitNum, offset) as any[];
+    const history = (await query(
+      'SELECT * FROM change_history WHERE interface_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3',
+      [id, limitNum, offset]
+    )).rows as any[];
 
-    const { total } = db.prepare('SELECT COUNT(*) as total FROM change_history WHERE interface_id = ?').get(id) as any;
+    const { total } = (await query('SELECT COUNT(*) as total FROM change_history WHERE interface_id = $1', [id])).rows[0] as any;
 
     res.json({
       data: history,
@@ -156,7 +157,7 @@ router.get('/interface/:id/history', (req, res) => {
   }
 });
 
-router.post('/batch-compare', (req, res) => {
+router.post('/batch-compare', async (req, res) => {
   try {
     const { source1, source2 } = req.body;
 
@@ -164,16 +165,16 @@ router.post('/batch-compare', (req, res) => {
       return res.status(400).json({ error: 'Both source1 and source2 are required' });
     }
 
-    const getInterfacesBySource = (source: { category?: string; project?: string }): any[] => {
+    const getInterfacesBySource = async (source: { category?: string; project?: string }): Promise<any[]> => {
       const category = source.category || source.project;
       if (!category) {
-        return db.prepare('SELECT * FROM interfaces').all() as any[];
+        return (await query('SELECT * FROM interfaces')).rows as any[];
       }
-      return db.prepare('SELECT * FROM interfaces WHERE category = ?').all(category) as any[];
+      return (await query('SELECT * FROM interfaces WHERE category = $1', [category])).rows as any[];
     };
 
-    const list1 = getInterfacesBySource(source1);
-    const list2 = getInterfacesBySource(source2);
+    const list1 = await getInterfacesBySource(source1);
+    const list2 = await getInterfacesBySource(source2);
 
     const map1 = new Map<string, any>();
     const map2 = new Map<string, any>();
@@ -233,32 +234,36 @@ router.post('/batch-compare', (req, res) => {
   }
 });
 
-router.get('/impact/:id', (req, res) => {
+router.get('/impact/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
-    const iface = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(id) as any;
+    const iface = (await query('SELECT * FROM interfaces WHERE id = $1', [id])).rows[0] as any;
     if (!iface) {
       return res.status(404).json({ error: 'Interface not found' });
     }
 
-    const fieldMappings = db.prepare('SELECT * FROM field_mappings WHERE interface_id = ?').all(id) as any[];
+    const fieldMappings = (await query('SELECT * FROM field_mappings WHERE interface_id = $1', [id])).rows as any[];
 
-    const mockConfigs = db.prepare('SELECT * FROM mock_configs WHERE interface_id = ?').all(id) as any[];
+    const mockConfigs = (await query('SELECT * FROM mock_configs WHERE interface_id = $1', [id])).rows as any[];
 
     const pathPrefix = iface.path.split('/').slice(0, -1).join('/');
-    const dependentInterfaces = db.prepare(
-      "SELECT * FROM interfaces WHERE id != ? AND (path LIKE ? OR path LIKE ?)"
-    ).all(id, `${pathPrefix}%`, `%${iface.path}%`) as any[];
+    const dependentInterfaces = (await query(
+      'SELECT * FROM interfaces WHERE id != $1 AND (path LIKE $2 OR path LIKE $3)',
+      [id, `${pathPrefix}%`, `%${iface.path}%`]
+    )).rows as any[];
 
     const relatedModels = new Set<string>();
     for (const mapping of fieldMappings) {
       relatedModels.add(mapping.model_name);
     }
 
-    const modelDetails = relatedModels.size > 0
-      ? db.prepare(`SELECT * FROM data_models WHERE name IN (${Array.from(relatedModels).map(() => '?').join(',')})`).all(...Array.from(relatedModels)) as any[]
-      : [];
+    let modelDetails: any[] = [];
+    if (relatedModels.size > 0) {
+      const modelNames = Array.from(relatedModels);
+      const placeholders = modelNames.map((_, i) => `$${i + 1}`).join(', ');
+      modelDetails = (await query(`SELECT * FROM data_models WHERE name IN (${placeholders})`, modelNames)).rows as any[];
+    }
 
     const affectedFieldMappings = fieldMappings.map((m: any) => ({
       id: m.id,

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import db from '../database.js';
+import { query } from '../database.js';
 
 const router = Router();
 
@@ -254,9 +254,9 @@ async function executeStep(
   }
 }
 
-router.get('/workflows', (_req, res) => {
+router.get('/workflows', async (_req, res) => {
   try {
-    const rows = db.prepare('SELECT * FROM workflows ORDER BY created_at DESC').all();
+    const rows = (await query('SELECT * FROM workflows ORDER BY created_at DESC')).rows;
     const list = rows.map(rowToWorkflow);
     res.json({ data: list });
   } catch (error) {
@@ -264,7 +264,7 @@ router.get('/workflows', (_req, res) => {
   }
 });
 
-router.post('/workflows', (req, res) => {
+router.post('/workflows', async (req, res) => {
   try {
     const { name, description, steps, status } = req.body;
     if (!name) {
@@ -280,9 +280,10 @@ router.post('/workflows', (req, res) => {
     }));
     const workflowStatus = status || 'draft';
 
-    db.prepare(
-      'INSERT INTO workflows (id, name, description, steps, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    ).run(id, name, description || '', JSON.stringify(parsedSteps), workflowStatus, now, now);
+    await query(
+      'INSERT INTO workflows (id, name, description, steps, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+      [id, name, description || '', JSON.stringify(parsedSteps), workflowStatus, now, now]
+    );
 
     const workflow: Workflow = {
       id,
@@ -299,10 +300,10 @@ router.post('/workflows', (req, res) => {
   }
 });
 
-router.put('/workflows/:id', (req, res) => {
+router.put('/workflows/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const row = db.prepare('SELECT * FROM workflows WHERE id = ?').get(id);
+    const row = (await query('SELECT * FROM workflows WHERE id = $1', [id])).rows[0];
     if (!row) {
       return res.status(404).json({ error: 'Workflow not found' });
     }
@@ -321,9 +322,10 @@ router.put('/workflows/:id', (req, res) => {
       : existing.steps;
     const updatedStatus = status ?? existing.status;
 
-    db.prepare(
-      'UPDATE workflows SET name = ?, description = ?, steps = ?, status = ?, updated_at = ? WHERE id = ?',
-    ).run(updatedName, updatedDescription, JSON.stringify(updatedSteps), updatedStatus, now, id);
+    await query(
+      'UPDATE workflows SET name = $1, description = $2, steps = $3, status = $4, updated_at = $5 WHERE id = $6',
+      [updatedName, updatedDescription, JSON.stringify(updatedSteps), updatedStatus, now, id]
+    );
 
     const updated: Workflow = {
       id,
@@ -340,15 +342,15 @@ router.put('/workflows/:id', (req, res) => {
   }
 });
 
-router.delete('/workflows/:id', (req, res) => {
+router.delete('/workflows/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const row = db.prepare('SELECT * FROM workflows WHERE id = ?').get(id);
+    const row = (await query('SELECT * FROM workflows WHERE id = $1', [id])).rows[0];
     if (!row) {
       return res.status(404).json({ error: 'Workflow not found' });
     }
-    db.prepare('DELETE FROM workflow_executions WHERE workflow_id = ?').run(id);
-    db.prepare('DELETE FROM workflows WHERE id = ?').run(id);
+    await query('DELETE FROM workflow_executions WHERE workflow_id = $1', [id]);
+    await query('DELETE FROM workflows WHERE id = $1', [id]);
     res.json({ message: 'Workflow deleted successfully' });
   } catch (error) {
     res.status(500).json({ error: 'Failed to delete workflow' });
@@ -358,7 +360,7 @@ router.delete('/workflows/:id', (req, res) => {
 router.post('/workflows/:id/execute', async (req, res) => {
   try {
     const { id } = req.params;
-    const row = db.prepare('SELECT * FROM workflows WHERE id = ?').get(id);
+    const row = (await query('SELECT * FROM workflows WHERE id = $1', [id])).rows[0];
     if (!row) {
       return res.status(404).json({ error: 'Workflow not found' });
     }
@@ -371,9 +373,10 @@ router.post('/workflows/:id/execute', async (req, res) => {
     const startedAt = new Date().toISOString();
     const now = new Date().toISOString();
 
-    db.prepare(
-      'INSERT INTO workflow_executions (id, workflow_id, status, step_results, error, started_at, completed_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    ).run(execId, id, 'running', JSON.stringify([]), null, startedAt, null, now);
+    await query(
+      'INSERT INTO workflow_executions (id, workflow_id, status, step_results, error, started_at, completed_at, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+      [execId, id, 'running', JSON.stringify([]), null, startedAt, null, now]
+    );
 
     const context: Record<string, any> = {
       previousOutput: req.body?.initialData ?? null,
@@ -444,9 +447,10 @@ router.post('/workflows/:id/execute', async (req, res) => {
       completedAt = new Date().toISOString();
     }
 
-    db.prepare(
-      'UPDATE workflow_executions SET status = ?, step_results = ?, error = ?, completed_at = ? WHERE id = ?',
-    ).run(finalStatus, JSON.stringify(stepResults), finalError, completedAt, execId);
+    await query(
+      'UPDATE workflow_executions SET status = $1, step_results = $2, error = $3, completed_at = $4 WHERE id = $5',
+      [finalStatus, JSON.stringify(stepResults), finalError, completedAt, execId]
+    );
 
     const execution: Execution = {
       id: execId,
@@ -463,16 +467,17 @@ router.post('/workflows/:id/execute', async (req, res) => {
   }
 });
 
-router.get('/workflows/:id/executions', (req, res) => {
+router.get('/workflows/:id/executions', async (req, res) => {
   try {
     const { id } = req.params;
-    const row = db.prepare('SELECT * FROM workflows WHERE id = ?').get(id);
+    const row = (await query('SELECT * FROM workflows WHERE id = $1', [id])).rows[0];
     if (!row) {
       return res.status(404).json({ error: 'Workflow not found' });
     }
-    const rows = db.prepare(
-      'SELECT * FROM workflow_executions WHERE workflow_id = ? ORDER BY started_at DESC',
-    ).all(id);
+    const rows = (await query(
+      'SELECT * FROM workflow_executions WHERE workflow_id = $1 ORDER BY started_at DESC',
+      [id]
+    )).rows;
     const list = rows.map(rowToExecution);
     res.json({ data: list });
   } catch (error) {
@@ -480,10 +485,10 @@ router.get('/workflows/:id/executions', (req, res) => {
   }
 });
 
-router.get('/workflows/:id/executions/:execId', (req, res) => {
+router.get('/workflows/:id/executions/:execId', async (req, res) => {
   try {
     const { id, execId } = req.params;
-    const row = db.prepare('SELECT * FROM workflow_executions WHERE id = ? AND workflow_id = ?').get(execId, id);
+    const row = (await query('SELECT * FROM workflow_executions WHERE id = $1 AND workflow_id = $2', [execId, id])).rows[0];
     if (!row) {
       return res.status(404).json({ error: 'Execution not found' });
     }

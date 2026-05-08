@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import db from '../database';
+import { query } from '../database.js';
 
 const router = Router();
 
@@ -65,9 +65,9 @@ function rowToResult(row: Record<string, any>): TestResult {
   };
 }
 
-router.get('/suites', (_req, res) => {
+router.get('/suites', async (_req, res) => {
   try {
-    const rows = db.prepare('SELECT * FROM test_suites ORDER BY created_at DESC').all() as Record<string, any>[];
+    const rows = (await query('SELECT * FROM test_suites ORDER BY created_at DESC')).rows as Record<string, any>[];
     const allSuites = rows.map(rowToSuite);
     res.json(allSuites);
   } catch (error) {
@@ -75,7 +75,7 @@ router.get('/suites', (_req, res) => {
   }
 });
 
-router.post('/suites', (req, res) => {
+router.post('/suites', async (req, res) => {
   try {
     const { name, description, interfaceIds, schedule, enabled } = req.body;
 
@@ -86,10 +86,10 @@ router.post('/suites', (req, res) => {
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    db.prepare(`
+    await query(`
       INSERT INTO test_suites (id, name, description, interface_ids, schedule, enabled, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `, [
       id,
       name,
       description || '',
@@ -98,9 +98,9 @@ router.post('/suites', (req, res) => {
       enabled !== undefined ? (enabled ? 1 : 0) : 1,
       now,
       now,
-    );
+    ]);
 
-    const row = db.prepare('SELECT * FROM test_suites WHERE id = ?').get(id) as Record<string, any>;
+    const row = (await query('SELECT * FROM test_suites WHERE id = $1', [id])).rows[0] as Record<string, any>;
     const suite = rowToSuite(row);
     res.status(201).json(suite);
   } catch (error) {
@@ -108,10 +108,10 @@ router.post('/suites', (req, res) => {
   }
 });
 
-router.put('/suites/:id', (req, res) => {
+router.put('/suites/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const row = db.prepare('SELECT * FROM test_suites WHERE id = ?').get(id) as Record<string, any> | undefined;
+    const row = (await query('SELECT * FROM test_suites WHERE id = $1', [id])).rows[0] as Record<string, any> | undefined;
 
     if (!row) {
       return res.status(404).json({ error: 'Test suite not found' });
@@ -128,11 +128,11 @@ router.put('/suites/:id', (req, res) => {
 
     const now = new Date().toISOString();
 
-    db.prepare(`
+    await query(`
       UPDATE test_suites
-      SET name = ?, description = ?, interface_ids = ?, schedule = ?, enabled = ?, updated_at = ?
-      WHERE id = ?
-    `).run(
+      SET name = $1, description = $2, interface_ids = $3, schedule = $4, enabled = $5, updated_at = $6
+      WHERE id = $7
+    `, [
       updatedName,
       updatedDescription,
       JSON.stringify(updatedInterfaceIds),
@@ -140,9 +140,9 @@ router.put('/suites/:id', (req, res) => {
       updatedEnabled ? 1 : 0,
       now,
       id,
-    );
+    ]);
 
-    const updatedRow = db.prepare('SELECT * FROM test_suites WHERE id = ?').get(id) as Record<string, any>;
+    const updatedRow = (await query('SELECT * FROM test_suites WHERE id = $1', [id])).rows[0] as Record<string, any>;
     const updated = rowToSuite(updatedRow);
     res.json(updated);
   } catch (error) {
@@ -150,17 +150,17 @@ router.put('/suites/:id', (req, res) => {
   }
 });
 
-router.delete('/suites/:id', (req, res) => {
+router.delete('/suites/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const row = db.prepare('SELECT * FROM test_suites WHERE id = ?').get(id) as Record<string, any> | undefined;
+    const row = (await query('SELECT * FROM test_suites WHERE id = $1', [id])).rows[0] as Record<string, any> | undefined;
 
     if (!row) {
       return res.status(404).json({ error: 'Test suite not found' });
     }
 
-    db.prepare('DELETE FROM test_results WHERE suite_id = ?').run(id);
-    db.prepare('DELETE FROM test_suites WHERE id = ?').run(id);
+    await query('DELETE FROM test_results WHERE suite_id = $1', [id]);
+    await query('DELETE FROM test_suites WHERE id = $1', [id]);
 
     res.json({ message: 'Test suite deleted successfully' });
   } catch (error) {
@@ -171,7 +171,7 @@ router.delete('/suites/:id', (req, res) => {
 router.post('/suites/:id/run', async (req, res) => {
   try {
     const { id } = req.params;
-    const row = db.prepare('SELECT * FROM test_suites WHERE id = ?').get(id) as Record<string, any> | undefined;
+    const row = (await query('SELECT * FROM test_suites WHERE id = $1', [id])).rows[0] as Record<string, any> | undefined;
 
     if (!row) {
       return res.status(404).json({ error: 'Test suite not found' });
@@ -182,7 +182,7 @@ router.post('/suites/:id/run', async (req, res) => {
     const testResults: TestResultItem[] = [];
 
     for (const interfaceId of suite.interfaceIds) {
-      const iface = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(interfaceId) as Record<string, any> | undefined;
+      const iface = (await query('SELECT * FROM interfaces WHERE id = $1', [interfaceId])).rows[0] as Record<string, any> | undefined;
 
       if (!iface) {
         testResults.push({
@@ -259,10 +259,10 @@ router.post('/suites/:id/run', async (req, res) => {
 
     const lastResult = failedCount === 0 ? 'passed' : (passedCount === 0 ? 'failed' : 'partial');
 
-    db.prepare(`
+    await query(`
       INSERT INTO test_results (id, suite_id, total_tests, passed, failed, results, started_at, completed_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `, [
       resultId,
       id,
       totalTests,
@@ -272,11 +272,11 @@ router.post('/suites/:id/run', async (req, res) => {
       now,
       now,
       now,
-    );
+    ]);
 
-    db.prepare(`
-      UPDATE test_suites SET last_run_at = ?, last_result = ?, updated_at = ? WHERE id = ?
-    `).run(now, lastResult, now, id);
+    await query(`
+      UPDATE test_suites SET last_run_at = $1, last_result = $2, updated_at = $3 WHERE id = $4
+    `, [now, lastResult, now, id]);
 
     const testResult: TestResult = {
       id: resultId,
@@ -294,16 +294,16 @@ router.post('/suites/:id/run', async (req, res) => {
   }
 });
 
-router.get('/suites/:id/results', (req, res) => {
+router.get('/suites/:id/results', async (req, res) => {
   try {
     const { id } = req.params;
-    const row = db.prepare('SELECT * FROM test_suites WHERE id = ?').get(id) as Record<string, any> | undefined;
+    const row = (await query('SELECT * FROM test_suites WHERE id = $1', [id])).rows[0] as Record<string, any> | undefined;
 
     if (!row) {
       return res.status(404).json({ error: 'Test suite not found' });
     }
 
-    const resultRows = db.prepare('SELECT * FROM test_results WHERE suite_id = ? ORDER BY completed_at DESC').all(id) as Record<string, any>[];
+    const resultRows = (await query('SELECT * FROM test_results WHERE suite_id = $1 ORDER BY completed_at DESC', [id])).rows as Record<string, any>[];
     const suiteResults = resultRows.map(rowToResult);
 
     res.json(suiteResults);
@@ -312,10 +312,10 @@ router.get('/suites/:id/results', (req, res) => {
   }
 });
 
-router.get('/results/:id', (req, res) => {
+router.get('/results/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const row = db.prepare('SELECT * FROM test_results WHERE id = ?').get(id) as Record<string, any> | undefined;
+    const row = (await query('SELECT * FROM test_results WHERE id = $1', [id])).rows[0] as Record<string, any> | undefined;
 
     if (!row) {
       return res.status(404).json({ error: 'Test result not found' });
@@ -336,7 +336,7 @@ router.post('/quick-test', async (req, res) => {
       return res.status(400).json({ error: 'interfaceId is required' });
     }
 
-    const iface = db.prepare('SELECT * FROM interfaces WHERE id = ?').get(interfaceId) as Record<string, any> | undefined;
+    const iface = (await query('SELECT * FROM interfaces WHERE id = $1', [interfaceId])).rows[0] as Record<string, any> | undefined;
 
     if (!iface) {
       return res.status(404).json({ error: 'Interface not found' });
@@ -401,10 +401,10 @@ router.post('/quick-test', async (req, res) => {
     const resultId = uuidv4();
     const now = new Date().toISOString();
 
-    db.prepare(`
+    await query(`
       INSERT INTO test_results (id, suite_id, total_tests, passed, failed, results, started_at, completed_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `, [
       resultId,
       '',
       1,
@@ -414,7 +414,7 @@ router.post('/quick-test', async (req, res) => {
       now,
       now,
       now,
-    );
+    ]);
 
     const testResult: TestResult = {
       id: resultId,

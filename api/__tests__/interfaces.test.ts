@@ -1,8 +1,8 @@
-import db from '../database';
+import { query } from '../database.js';
 
 describe('Interfaces API', () => {
-  beforeAll(() => {
-    db.exec(`
+  beforeAll(async () => {
+    await query(`
       CREATE TABLE IF NOT EXISTS interfaces (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -18,21 +18,21 @@ describe('Interfaces API', () => {
         created_by TEXT,
         created_at TEXT,
         updated_at TEXT
-      );
+      )
     `);
   });
 
-  afterAll(() => {
-    db.exec('DELETE FROM interfaces WHERE name LIKE "Test Interface%"');
+  afterAll(async () => {
+    await query("DELETE FROM interfaces WHERE name LIKE 'Test Interface%'");
   });
 
-  test('should be able to query interfaces', () => {
-    const interfaces = db.prepare('SELECT * FROM interfaces LIMIT 10').all();
+  test('should be able to query interfaces', async () => {
+    const interfaces = (await query('SELECT * FROM interfaces LIMIT 10')).rows;
     expect(Array.isArray(interfaces)).toBe(true);
   });
 
-  test('should have valid interface structure', () => {
-    const interfaces = db.prepare('SELECT * FROM interfaces LIMIT 1').all();
+  test('should have valid interface structure', async () => {
+    const interfaces = (await query('SELECT * FROM interfaces LIMIT 1')).rows;
     if (interfaces.length > 0) {
       const iface = interfaces[0] as any;
       expect(iface).toHaveProperty('id');
@@ -42,28 +42,28 @@ describe('Interfaces API', () => {
     }
   });
 
-  test('should filter interfaces by method', () => {
-    const getInterfaces = db.prepare("SELECT * FROM interfaces WHERE method = 'GET'").all();
+  test('should filter interfaces by method', async () => {
+    const getInterfaces = (await query("SELECT * FROM interfaces WHERE method = 'GET'")).rows;
     expect(Array.isArray(getInterfaces)).toBe(true);
     getInterfaces.forEach((iface: any) => {
       expect(iface.method).toBe('GET');
     });
   });
 
-  test('should filter interfaces by category', () => {
-    const userInterfaces = db.prepare("SELECT * FROM interfaces WHERE category = '用户管理'").all();
+  test('should filter interfaces by category', async () => {
+    const userInterfaces = (await query("SELECT * FROM interfaces WHERE category = '用户管理'")).rows;
     expect(Array.isArray(userInterfaces)).toBe(true);
   });
 
-  test('should search interfaces by name', () => {
-    const results = db.prepare("SELECT * FROM interfaces WHERE name LIKE '%用户%'").all();
+  test('should search interfaces by name', async () => {
+    const results = (await query("SELECT * FROM interfaces WHERE name LIKE '%用户%'")).rows;
     expect(Array.isArray(results)).toBe(true);
   });
 
-  test('should get interface with parameters', () => {
-    const interfaces = db.prepare('SELECT * FROM interfaces LIMIT 5').all() as any[];
+  test('should get interface with parameters', async () => {
+    const interfaces = (await query('SELECT * FROM interfaces LIMIT 5')).rows as any[];
     
-    db.exec(`
+    await query(`
       CREATE TABLE IF NOT EXISTS parameters (
         id TEXT PRIMARY KEY,
         interface_id TEXT NOT NULL,
@@ -73,11 +73,11 @@ describe('Interfaces API', () => {
         required INTEGER DEFAULT 0,
         description TEXT,
         FOREIGN KEY (interface_id) REFERENCES interfaces(id)
-      );
+      )
     `);
 
     if (interfaces.length > 0) {
-      const params = db.prepare('SELECT * FROM parameters WHERE interface_id = ?').all(interfaces[0].id);
+      const params = (await query('SELECT * FROM parameters WHERE interface_id = $1', [interfaces[0].id])).rows;
       expect(Array.isArray(params)).toBe(true);
     }
   });

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import db from '../database';
+import { pool, query } from '../database.js';
 import { v4 as uuidv4 } from 'uuid';
 import { cacheManager } from '../utils/cache';
 
@@ -19,7 +19,7 @@ router.post('/parse', (req, res) => {
   }
 });
 
-router.post('/import', (req, res) => {
+router.post('/import', async (req, res) => {
   try {
     const { spec, options } = req.body;
     if (!spec) {
@@ -31,26 +31,18 @@ router.post('/import', (req, res) => {
     const imported = { interfaces: 0, parameters: 0, models: 0, skipped: 0 };
     const overwrite = options?.overwrite || false;
 
-    const insertInterface = db.prepare(`
-      INSERT INTO interfaces (id, name, path, method, description, category, tags, status, version, request_schema, response_schema, created_by, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    const insertParam = db.prepare(`
-      INSERT INTO parameters (id, interface_id, name, location, type, required, description, example)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
 
-    const transaction = db.transaction(() => {
       for (const iface of parsed.interfaces) {
-        const existing = db.prepare('SELECT id FROM interfaces WHERE path = ? AND method = ?').get(iface.path, iface.method) as any;
+        const existing = (await client.query('SELECT id FROM interfaces WHERE path = $1 AND method = $2', [iface.path, iface.method])).rows[0] as any;
 
         if (existing) {
           if (overwrite) {
-            const deleteParams = db.prepare('DELETE FROM parameters WHERE interface_id = ?');
-            const deleteMappings = db.prepare('DELETE FROM field_mappings WHERE interface_id = ?');
-            deleteParams.run(existing.id);
-            deleteMappings.run(existing.id);
-            db.prepare('DELETE FROM interfaces WHERE id = ?').run(existing.id);
+            await client.query('DELETE FROM parameters WHERE interface_id = $1', [existing.id]);
+            await client.query('DELETE FROM field_mappings WHERE interface_id = $1', [existing.id]);
+            await client.query('DELETE FROM interfaces WHERE id = $1', [existing.id]);
           } else {
             imported.skipped++;
             continue;
@@ -58,7 +50,10 @@ router.post('/import', (req, res) => {
         }
 
         const id = uuidv4();
-        insertInterface.run(
+        await client.query(`
+          INSERT INTO interfaces (id, name, path, method, description, category, tags, status, version, request_schema, response_schema, created_by, created_at, updated_at)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        `, [
           id,
           iface.name,
           iface.path,
@@ -73,10 +68,13 @@ router.post('/import', (req, res) => {
           'openapi-import',
           now,
           now
-        );
+        ]);
 
         for (const param of iface.parameters || []) {
-          insertParam.run(
+          await client.query(`
+            INSERT INTO parameters (id, interface_id, name, location, type, required, description, example)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          `, [
             uuidv4(),
             id,
             param.name,
@@ -85,7 +83,7 @@ router.post('/import', (req, res) => {
             param.required ? 1 : 0,
             param.description || '',
             param.example || ''
-          );
+          ]);
           imported.parameters++;
         }
 
@@ -93,32 +91,32 @@ router.post('/import', (req, res) => {
       }
 
       for (const model of parsed.models || []) {
-        const existing = db.prepare('SELECT name FROM data_models WHERE name = ?').get(model.name);
+        const existing = (await client.query('SELECT name FROM data_models WHERE name = $1', [model.name])).rows[0];
         if (existing) {
           if (!overwrite) {
             continue;
           }
-          db.prepare('DELETE FROM fields WHERE model_name = ?').run(model.name);
-          db.prepare('DELETE FROM data_models WHERE name = ?').run(model.name);
+          await client.query('DELETE FROM fields WHERE model_name = $1', [model.name]);
+          await client.query('DELETE FROM data_models WHERE name = $1', [model.name]);
         }
 
-        db.prepare(`
+        await client.query(`
           INSERT INTO data_models (name, table_name, description, schema, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(
+          VALUES ($1, $2, $3, $4, $5, $6)
+        `, [
           model.name,
           model.name.toLowerCase(),
           model.description || `Imported from OpenAPI spec`,
           model.schema ? JSON.stringify(model.schema) : null,
           now,
           now
-        );
+        ]);
 
         for (const field of model.fields || []) {
-          db.prepare(`
+          await client.query(`
             INSERT INTO fields (id, model_name, name, column_name, type, nullable, comment)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-          `).run(
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+          `, [
             uuidv4(),
             model.name,
             field.name,
@@ -126,14 +124,19 @@ router.post('/import', (req, res) => {
             field.type || 'string',
             field.nullable ? 1 : 0,
             field.description || ''
-          );
+          ]);
         }
 
         imported.models++;
       }
-    });
 
-    transaction();
+      await client.query('COMMIT');
+    } catch (_e: any) {
+      await client.query('ROLLBACK');
+      throw _e;
+    } finally {
+      client.release();
+    }
 
     cacheManager.invalidate('interfaces:');
     cacheManager.invalidate('models:');
@@ -375,23 +378,24 @@ function generateName(path: string, method: string): string {
   return `${action}${resource || 'Root'}`;
 }
 
-router.get('/export', (req, res) => {
+router.get('/export', async (req, res) => {
   try {
     const { category, status } = req.query;
 
     let whereClause = '1=1';
     const params: any[] = [];
+    let paramIdx = 1;
     if (category) {
-      whereClause += ' AND category = ?';
+      whereClause += ` AND category = $${paramIdx++}`;
       params.push(category);
     }
     if (status) {
-      whereClause += ' AND status = ?';
+      whereClause += ` AND status = $${paramIdx++}`;
       params.push(status);
     }
 
-    const interfaces = db.prepare(`SELECT * FROM interfaces WHERE ${whereClause} ORDER BY path, method`).all(...params) as any[];
-    const models = db.prepare('SELECT * FROM data_models ORDER BY name').all() as any[];
+    const interfaces = (await query(`SELECT * FROM interfaces WHERE ${whereClause} ORDER BY path, method`, params)).rows as any[];
+    const models = (await query('SELECT * FROM data_models ORDER BY name')).rows as any[];
 
     const spec: any = {
       openapi: '3.0.3',
@@ -428,7 +432,7 @@ router.get('/export', (req, res) => {
             operation.tags = parsedTags;
             parsedTags.forEach((t: string) => tags.add(t));
           }
-        } catch {}
+        } catch (_e) {}
       }
 
       if (iface.category && !operation.tags.length) {
@@ -436,7 +440,7 @@ router.get('/export', (req, res) => {
         tags.add(iface.category);
       }
 
-      const parameters = db.prepare('SELECT * FROM parameters WHERE interface_id = ?').all(iface.id) as any[];
+      const parameters = (await query('SELECT * FROM parameters WHERE interface_id = $1', [iface.id])).rows as any[];
       if (parameters.length > 0) {
         operation.parameters = parameters.map((p) => {
           const param: any = {
@@ -463,7 +467,7 @@ router.get('/export', (req, res) => {
               },
             },
           };
-        } catch {}
+        } catch (_e) {}
       }
 
       operation.responses = {
@@ -480,7 +484,7 @@ router.get('/export', (req, res) => {
               schema: responseSchema,
             },
           };
-        } catch {}
+        } catch (_e) {}
       }
 
       if (iface.status === 'deprecated') {
@@ -491,7 +495,7 @@ router.get('/export', (req, res) => {
     }
 
     for (const model of models) {
-      const fields = db.prepare('SELECT * FROM fields WHERE model_name = ?').all(model.name) as any[];
+      const fields = (await query('SELECT * FROM fields WHERE model_name = $1', [model.name])).rows as any[];
       const schema: any = {
         type: 'object',
         properties: {},

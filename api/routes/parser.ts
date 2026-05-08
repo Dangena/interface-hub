@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import db from '../database';
+import { query } from '../database.js';
 
 const router = Router();
 
@@ -123,14 +123,14 @@ router.post('/import/parsed', async (req, res) => {
     const imported = { interfaces: 0, models: 0, mappings: 0 };
 
     for (const iface of interfaces) {
-      const existing = db.prepare('SELECT * FROM interfaces WHERE path = ? AND method = ?').get(iface.path, iface.method);
+      const existing = (await query('SELECT * FROM interfaces WHERE path = $1 AND method = $2', [iface.path, iface.method])).rows[0];
       if (existing) continue;
 
       const id = uuidv4();
-      db.prepare(`
+      await query(`
         INSERT INTO interfaces (id, name, path, method, description, category, tags, status, version, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `, [
         id,
         iface.name,
         iface.path,
@@ -142,32 +142,32 @@ router.post('/import/parsed', async (req, res) => {
         '1.0.0',
         now,
         now
-      );
+      ]);
 
       for (const param of iface.parameters) {
-        db.prepare(`
+        await query(`
           INSERT INTO parameters (id, interface_id, name, location, type, required, description)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `).run(uuidv4(), id, param.name, param.location, param.type, param.required ? 1 : 0, '');
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `, [uuidv4(), id, param.name, param.location, param.type, param.required ? 1 : 0, '']);
       }
 
       imported.interfaces++;
     }
 
     for (const model of models) {
-      const existing = db.prepare('SELECT * FROM data_models WHERE name = ?').get(model.name);
+      const existing = (await query('SELECT * FROM data_models WHERE name = $1', [model.name])).rows[0];
       if (existing) continue;
 
-      db.prepare(`
+      await query(`
         INSERT INTO data_models (name, table_name, description, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(model.name, model.name.toLowerCase() + 's', 'Auto imported from code', now, now);
+        VALUES ($1, $2, $3, $4, $5)
+      `, [model.name, model.name.toLowerCase() + 's', 'Auto imported from code', now, now]);
 
       for (const field of model.fields) {
-        db.prepare(`
+        await query(`
           INSERT INTO fields (id, model_name, name, column_name, type, nullable, comment)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `).run(
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `, [
           uuidv4(),
           model.name,
           field.name,
@@ -175,7 +175,7 @@ router.post('/import/parsed', async (req, res) => {
           convertJavaType(field.type),
           field.nullable ? 1 : 0,
           field.comment || ''
-        );
+        ]);
       }
 
       imported.models++;
@@ -184,13 +184,13 @@ router.post('/import/parsed', async (req, res) => {
     if (interfaces.length > 0 && models.length > 0) {
       const mappings = generateAutoMappings(interfaces, models);
       for (const mapping of mappings) {
-        const existing = db.prepare('SELECT * FROM field_mappings WHERE interface_id = ? AND interface_field = ? AND model_name = ?').get(mapping.interfaceId, mapping.interfaceField, mapping.modelName);
+        const existing = (await query('SELECT * FROM field_mappings WHERE interface_id = $1 AND interface_field = $2 AND model_name = $3', [mapping.interfaceId, mapping.interfaceField, mapping.modelName])).rows[0];
         if (existing) continue;
 
-        db.prepare(`
+        await query(`
           INSERT INTO field_mappings (id, interface_id, interface_field, model_name, model_field, created_at)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(uuidv4(), mapping.interfaceId, mapping.interfaceField, mapping.modelName, mapping.modelField, now);
+          VALUES ($1, $2, $3, $4, $5, $6)
+        `, [uuidv4(), mapping.interfaceId, mapping.interfaceField, mapping.modelName, mapping.modelField, now]);
 
         imported.mappings++;
       }

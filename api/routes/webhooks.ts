@@ -1,21 +1,21 @@
 import { Router } from 'express';
-import db from '../database';
+import { query } from '../database.js';
 import { v4 as uuidv4 } from 'uuid';
 import { authenticateToken, requireAdmin } from './auth';
 import { cacheManager } from '../utils/cache';
 
 const router = Router();
 
-router.get('/', authenticateToken, (req, res) => {
+router.get('/', authenticateToken, async (req, res) => {
   try {
-    const webhooks = db.prepare('SELECT * FROM webhooks ORDER BY created_at DESC').all() as any[];
+    const webhooks = (await query('SELECT * FROM webhooks ORDER BY created_at DESC')).rows as any[];
     res.json(webhooks.map(w => ({ ...w, events: JSON.parse(w.events), enabled: Boolean(w.enabled) })));
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch webhooks' });
   }
 });
 
-router.post('/', authenticateToken, requireAdmin, (req, res) => {
+router.post('/', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { name, url, events, secret } = req.body;
     if (!name || !url || !events?.length) {
@@ -25,10 +25,10 @@ router.post('/', authenticateToken, requireAdmin, (req, res) => {
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    db.prepare(`
+    await query(`
       INSERT INTO webhooks (id, name, url, events, secret, enabled, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-    `).run(id, name, url, JSON.stringify(events), secret || '', now, now);
+      VALUES ($1, $2, $3, $4, $5, 1, $6, $7)
+    `, [id, name, url, JSON.stringify(events), secret || '', now, now]);
 
     res.status(201).json({ id, name, url, events, enabled: true, created_at: now });
   } catch (error) {
@@ -36,28 +36,28 @@ router.post('/', authenticateToken, requireAdmin, (req, res) => {
   }
 });
 
-router.put('/:id', authenticateToken, requireAdmin, (req, res) => {
+router.put('/:id', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { name, url, events, secret, enabled } = req.body;
 
-    const existing = db.prepare('SELECT * FROM webhooks WHERE id = ?').get(id);
+    const existing = (await query('SELECT * FROM webhooks WHERE id = $1', [id])).rows[0];
     if (!existing) {
       return res.status(404).json({ error: 'Webhook not found' });
     }
 
     const now = new Date().toISOString();
-    db.prepare(`
-      UPDATE webhooks SET name = ?, url = ?, events = ?, secret = ?, enabled = ?, updated_at = ?
-      WHERE id = ?
-    `).run(
+    await query(`
+      UPDATE webhooks SET name = $1, url = $2, events = $3, secret = $4, enabled = $5, updated_at = $6
+      WHERE id = $7
+    `, [
       name || (existing as any).name,
       url || (existing as any).url,
       JSON.stringify(events || JSON.parse((existing as any).events)),
       secret !== undefined ? secret : (existing as any).secret,
       enabled !== undefined ? (enabled ? 1 : 0) : (existing as any).enabled,
       now, id
-    );
+    ]);
 
     res.json({ message: 'Webhook updated' });
   } catch (error) {
@@ -65,10 +65,10 @@ router.put('/:id', authenticateToken, requireAdmin, (req, res) => {
   }
 });
 
-router.delete('/:id', authenticateToken, requireAdmin, (req, res) => {
+router.delete('/:id', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    db.prepare('DELETE FROM webhooks WHERE id = ?').run(id);
+    await query('DELETE FROM webhooks WHERE id = $1', [id]);
     res.json({ message: 'Webhook deleted' });
   } catch (error) {
     res.status(500).json({ error: 'Failed to delete webhook' });
@@ -78,7 +78,7 @@ router.delete('/:id', authenticateToken, requireAdmin, (req, res) => {
 router.post('/:id/test', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const webhook = db.prepare('SELECT * FROM webhooks WHERE id = ?').get(id) as any;
+    const webhook = (await query('SELECT * FROM webhooks WHERE id = $1', [id])).rows[0] as any;
     if (!webhook) {
       return res.status(404).json({ error: 'Webhook not found' });
     }
@@ -108,14 +108,14 @@ router.post('/:id/test', authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-export function triggerWebhooks(event: string, data: any): void {
+export async function triggerWebhooks(event: string, data: any): Promise<void> {
   try {
-    const webhooks = db.prepare('SELECT * FROM webhooks WHERE enabled = 1').all() as any[];
+    const webhooks = (await query('SELECT * FROM webhooks WHERE enabled = 1')).rows as any[];
     const matchingWebhooks = webhooks.filter(w => {
       try {
         const events = JSON.parse(w.events);
         return events.includes(event) || events.includes('*');
-      } catch { return false; }
+      } catch (_e) { return false; }
     });
 
     for (const webhook of matchingWebhooks) {
@@ -128,7 +128,7 @@ export function triggerWebhooks(event: string, data: any): void {
         body: JSON.stringify({ event, timestamp: new Date().toISOString(), data }),
       }).catch(() => {});
     }
-  } catch {}
+  } catch (_e) {}
 }
 
 export default router;

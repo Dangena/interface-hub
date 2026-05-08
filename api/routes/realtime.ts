@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import db from '../database';
+import { query } from '../database.js';
 
 const router = Router();
 
@@ -22,33 +22,17 @@ interface Subscription {
 const subscriptions = new Map<string, Subscription>();
 const channelSubscriptions = new Map<string, Set<string>>();
 
-const insertChannelStmt = db.prepare(
-  'INSERT OR IGNORE INTO realtime_channels (id, channel, created_at) VALUES (?, ?, ?)'
-);
-
-const insertMessageStmt = db.prepare(
-  'INSERT INTO realtime_messages (id, channel, event, data, created_at) VALUES (?, ?, ?, ?, ?)'
-);
-
-const getRecentMessagesStmt = db.prepare(
-  'SELECT id, channel, event, data, created_at FROM realtime_messages WHERE channel = ? ORDER BY created_at DESC LIMIT ?'
-);
-
-const getChannelMessagesStmt = db.prepare(
-  'SELECT id, channel, event, data, created_at FROM realtime_messages WHERE channel = ? ORDER BY created_at ASC LIMIT ?'
-);
-
-function ensureChannel(channel: string) {
-  insertChannelStmt.run(uuidv4(), channel, new Date().toISOString());
+async function ensureChannel(channel: string) {
+  await query(
+    'INSERT INTO realtime_channels (id, channel, created_at) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+    [uuidv4(), channel, new Date().toISOString()]
+  );
 }
 
-function persistMessage(message: WebSocketMessage) {
-  insertMessageStmt.run(
-    message.id,
-    message.channel,
-    message.event,
-    JSON.stringify(message.data),
-    message.timestamp
+async function persistMessage(message: WebSocketMessage) {
+  await query(
+    'INSERT INTO realtime_messages (id, channel, event, data, created_at) VALUES ($1, $2, $3, $4, $5)',
+    [message.id, message.channel, message.event, JSON.stringify(message.data), message.timestamp]
   );
 }
 
@@ -62,10 +46,10 @@ function rowToMessage(row: any): WebSocketMessage {
   };
 }
 
-router.get('/channels', (req, res) => {
-  const channels = db.prepare(
+router.get('/channels', async (req, res) => {
+  const channels = (await query(
     'SELECT channel, created_at FROM realtime_channels ORDER BY created_at ASC'
-  ).all() as any[];
+  )).rows as any[];
 
   const result = channels.map(ch => ({
     channel: ch.channel,
@@ -75,7 +59,7 @@ router.get('/channels', (req, res) => {
   res.json(result);
 });
 
-router.post('/subscribe', (req, res) => {
+router.post('/subscribe', async (req, res) => {
   const { channel } = req.body;
 
   if (!channel) {
@@ -83,7 +67,7 @@ router.post('/subscribe', (req, res) => {
     return;
   }
 
-  ensureChannel(channel);
+  await ensureChannel(channel);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -107,7 +91,10 @@ router.post('/subscribe', (req, res) => {
 
   res.write(`event: connected\ndata: ${JSON.stringify({ subscriptionId: subId, channel })}\n\n`);
 
-  const recentRows = getRecentMessagesStmt.all(channel, 10) as any[];
+  const recentRows = (await query(
+    'SELECT id, channel, event, data, created_at FROM realtime_messages WHERE channel = $1 ORDER BY created_at DESC LIMIT $2',
+    [channel, 10]
+  )).rows as any[];
   const recentMessages = recentRows.reverse().map(rowToMessage);
   for (const msg of recentMessages) {
     res.write(`event: ${msg.event}\ndata: ${JSON.stringify(msg)}\n\n`);
@@ -125,7 +112,7 @@ router.post('/subscribe', (req, res) => {
   });
 });
 
-router.post('/publish', (req, res) => {
+router.post('/publish', async (req, res) => {
   const { channel, event, data } = req.body;
 
   if (!channel || !event) {
@@ -141,8 +128,8 @@ router.post('/publish', (req, res) => {
     timestamp: new Date().toISOString(),
   };
 
-  ensureChannel(channel);
-  persistMessage(message);
+  await ensureChannel(channel);
+  await persistMessage(message);
 
   const subs = channelSubscriptions.get(channel);
   let sentCount = 0;
@@ -154,7 +141,7 @@ router.post('/publish', (req, res) => {
         try {
           subscription.res.write(`event: ${event}\ndata: ${JSON.stringify(message)}\n\n`);
           sentCount++;
-        } catch {
+        } catch (_e: any) {
           subscriptions.delete(subId);
           subs.delete(subId);
         }
@@ -188,18 +175,21 @@ router.post('/unsubscribe', (req, res) => {
   res.json({ success: true });
 });
 
-router.get('/history/:channel', (req, res) => {
+router.get('/history/:channel', async (req, res) => {
   const { channel } = req.params;
   const limit = parseInt(req.query.limit as string) || 50;
-  const rows = getChannelMessagesStmt.all(channel, limit) as any[];
+  const rows = (await query(
+    'SELECT id, channel, event, data, created_at FROM realtime_messages WHERE channel = $1 ORDER BY created_at ASC LIMIT $2',
+    [channel, limit]
+  )).rows as any[];
   const messages = rows.map(rowToMessage);
   res.json(messages);
 });
 
-router.get('/status', (req, res) => {
-  const dbChannels = db.prepare(
+router.get('/status', async (req, res) => {
+  const dbChannels = (await query(
     'SELECT channel FROM realtime_channels ORDER BY created_at ASC'
-  ).all() as any[];
+  )).rows as any[];
 
   const channelDetails: Record<string, number> = {};
   for (const ch of dbChannels) {
@@ -219,7 +209,7 @@ router.get('/status', (req, res) => {
   });
 });
 
-export function broadcastToChannel(channel: string, event: string, data: any): number {
+export async function broadcastToChannel(channel: string, event: string, data: any): Promise<number> {
   const message: WebSocketMessage = {
     id: uuidv4(),
     channel,
@@ -228,8 +218,8 @@ export function broadcastToChannel(channel: string, event: string, data: any): n
     timestamp: new Date().toISOString(),
   };
 
-  ensureChannel(channel);
-  persistMessage(message);
+  await ensureChannel(channel);
+  await persistMessage(message);
 
   let sentCount = 0;
   const subs = channelSubscriptions.get(channel);
@@ -241,7 +231,7 @@ export function broadcastToChannel(channel: string, event: string, data: any): n
         try {
           subscription.res.write(`event: ${event}\ndata: ${JSON.stringify(message)}\n\n`);
           sentCount++;
-        } catch {
+        } catch (_e: any) {
           subscriptions.delete(subId);
           subs.delete(subId);
         }

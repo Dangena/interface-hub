@@ -1,48 +1,48 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import db from '../database';
+import { query } from '../database.js';
 const router = Router();
 interface DatabaseConnection {
- id: string;
- name: string;
- type: 'mysql' | 'postgresql' | 'sqlite' | 'mssql';
- host: string;
- port: number;
- database: string;
- username: string;
- password?: string;
- path?: string;
- created_at: string;
+  id: string;
+  name: string;
+  type: 'mysql' | 'postgresql' | 'sqlite' | 'mssql';
+  host: string;
+  port: number;
+  database: string;
+  username: string;
+  password?: string;
+  path?: string;
+  created_at: string;
 }
-router.get('/connections', (req, res) => {
+router.get('/connections', async (req, res) => {
  try {
- const connections = db.prepare('SELECT * FROM database_connections ORDER BY created_at DESC').all();
+ const connections = (await query('SELECT * FROM database_connections ORDER BY created_at DESC')).rows;
  res.json(connections);
  }
  catch (error) {
  res.status(500).json({ error: 'Failed to fetch connections' });
  }
 });
-router.post('/connections', (req, res) => {
+router.post('/connections', async (req, res) => {
  try {
  const { name, type, host, port, database, username, password, path } = req.body;
  const id = uuidv4();
  const now = new Date().toISOString();
- db.prepare(`
+ await query(`
  INSERT INTO database_connections (id, name, type, host, port, database_name, username, password, path, created_at)
- VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
- `).run(id, name, type, host || '', port || 0, database, username, password || null, path || null, now);
- const connection = db.prepare('SELECT * FROM database_connections WHERE id = ?').get(id);
+ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+ `, [id, name, type, host || '', port || 0, database, username, password || null, path || null, now]);
+ const connection = (await query('SELECT * FROM database_connections WHERE id = $1', [id])).rows[0];
  res.status(201).json(connection);
  }
  catch (error) {
  res.status(500).json({ error: 'Failed to create connection' });
  }
 });
-router.delete('/connections/:id', (req, res) => {
+router.delete('/connections/:id', async (req, res) => {
  try {
  const { id } = req.params;
- db.prepare('DELETE FROM database_connections WHERE id = ?').run(id);
+ await query('DELETE FROM database_connections WHERE id = $1', [id]);
  res.json({ message: 'Connection deleted successfully' });
  }
  catch (error) {
@@ -52,7 +52,7 @@ router.delete('/connections/:id', (req, res) => {
 router.post('/connections/:id/test', async (req, res) => {
  try {
  const { id } = req.params;
- const connection = db.prepare('SELECT * FROM database_connections WHERE id = ?').get(id) as any;
+ const connection = (await query('SELECT * FROM database_connections WHERE id = $1', [id])).rows[0] as any;
  if (!connection) {
  return res.status(404).json({ error: 'Connection not found' });
  }
@@ -121,7 +121,7 @@ router.post('/connections/:id/test', async (req, res) => {
 router.post('/connections/:id/scan', async (req, res) => {
  try {
  const { id } = req.params;
- const connection = db.prepare('SELECT * FROM database_connections WHERE id = ?').get(id) as any;
+ const connection = (await query('SELECT * FROM database_connections WHERE id = $1', [id])).rows[0] as any;
  if (!connection) {
  return res.status(404).json({ error: 'Connection not found' });
  }
@@ -241,27 +241,27 @@ router.post('/connections/:id/import', async (req, res) => {
  try {
  const { id } = req.params;
  const { tables } = req.body;
- const connection = db.prepare('SELECT * FROM database_connections WHERE id = ?').get(id) as any;
+ const connection = (await query('SELECT * FROM database_connections WHERE id = $1', [id])).rows[0] as any;
  if (!connection) {
  return res.status(404).json({ error: 'Connection not found' });
  }
  const now = new Date().toISOString();
  const importedModels: string[] = [];
  for (const table of tables) {
- const existingModel = db.prepare('SELECT * FROM data_models WHERE table_name = ?').get(table.name);
+ const existingModel = (await query('SELECT * FROM data_models WHERE table_name = $1', [table.name])).rows[0];
  if (existingModel) {
  continue;
  }
- db.prepare(`
+ await query(`
  INSERT INTO data_models (name, table_name, description, created_at, updated_at)
- VALUES (?, ?, ?, ?, ?)
- `).run(table.name, table.name, `Auto imported from ${connection.name}`, now, now);
+ VALUES ($1, $2, $3, $4, $5)
+ `, [table.name, table.name, `Auto imported from ${connection.name}`, now, now]);
  importedModels.push(table.name);
  for (const column of table.columns) {
- db.prepare(`
+ await query(`
  INSERT INTO fields (id, model_name, name, column_name, type, nullable, primary_key, comment)
- VALUES (?, ?, ?, ?, ?, ?, ?, ?)
- `).run(uuidv4(), table.name, column.name, column.name, column.type, column.nullable ? 1 : 0, column.primaryKey ? 1 : 0, `Auto imported`);
+ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+ `, [uuidv4(), table.name, column.name, column.name, column.type, column.nullable ? 1 : 0, column.primaryKey ? 1 : 0, `Auto imported`]);
  }
  }
  res.json({ success: true, importedModels, count: importedModels.length });
