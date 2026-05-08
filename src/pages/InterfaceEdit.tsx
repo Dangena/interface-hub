@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import { ArrowLeft, Save, Plus, Trash2 } from 'lucide-react';
 import api from '../services/api';
 import { toast } from '../components/Toast';
@@ -17,9 +17,11 @@ interface ParamRow {
 const PARAM_LOCATIONS = ['query', 'path', 'header', 'body', 'cookie'];
 const PARAM_TYPES = ['string', 'integer', 'number', 'boolean', 'array', 'object', 'file'];
 
-export default function InterfaceCreate() {
+export default function InterfaceEdit() {
+  const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'basic' | 'params'>('basic');
   const [formData, setFormData] = useState({
     name: '',
@@ -34,6 +36,43 @@ export default function InterfaceCreate() {
     responseSchema: null as any,
   });
   const [parameters, setParameters] = useState<ParamRow[]>([]);
+
+  useEffect(() => {
+    if (id) loadInterface(id);
+  }, [id]);
+
+  const loadInterface = async (interfaceId: string) => {
+    try {
+      const data = await api.get(`/interfaces/${interfaceId}`);
+      setFormData({
+        name: data.name || '',
+        path: data.path || '',
+        method: data.method || 'GET',
+        description: data.description || '',
+        category: data.category || '',
+        tags: data.tags || [],
+        status: data.status || 'draft',
+        version: data.version || '1.0.0',
+        requestSchema: data.requestSchema || null,
+        responseSchema: data.responseSchema || null,
+      });
+      setParameters(
+        (data.parameters || []).map((p: any) => ({
+          id: p.id,
+          name: p.name,
+          location: p.location,
+          type: p.type,
+          required: Boolean(p.required),
+          description: p.description || '',
+          example: p.example || '',
+        }))
+      );
+    } catch (error: any) {
+      toast('error', error.message || '加载接口失败');
+    } finally {
+      setInitialLoading(false);
+    }
+  };
 
   const generateId = () => `temp_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
 
@@ -65,11 +104,11 @@ export default function InterfaceCreate() {
     setLoading(true);
 
     try {
-      await api.post('/interfaces', { ...formData, parameters: validParams });
-      toast('success', '接口创建成功');
-      navigate('/interfaces');
+      await api.put(`/interfaces/${id}`, { ...formData, parameters: validParams });
+      toast('success', '接口更新成功');
+      navigate(`/interfaces/${id}`);
     } catch (error: any) {
-      toast('error', error.message || '创建接口失败');
+      toast('error', error.message || '更新接口失败');
     } finally {
       setLoading(false);
     }
@@ -126,18 +165,26 @@ export default function InterfaceCreate() {
     }
   };
 
+  if (initialLoading) {
+    return (
+      <div className="flex items-center justify-center h-screen">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+      </div>
+    );
+  }
+
   return (
     <div className="p-8">
       <div className="mb-8">
         <Link
-          to="/interfaces"
+          to={`/interfaces/${id}`}
           className="flex items-center gap-2 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white mb-4"
         >
           <ArrowLeft className="w-5 h-5" />
-          返回列表
+          返回详情
         </Link>
-        <h1 className="text-3xl font-bold text-gray-900 dark:text-white">创建接口</h1>
-        <p className="text-gray-600 dark:text-gray-400 mt-2">定义新的 API 接口</p>
+        <h1 className="text-3xl font-bold text-gray-900 dark:text-white">编辑接口</h1>
+        <p className="text-gray-600 dark:text-gray-400 mt-2">修改接口信息和参数定义</p>
       </div>
 
       <form onSubmit={handleSubmit} className="max-w-5xl">
@@ -425,7 +472,7 @@ export default function InterfaceCreate() {
 
           <div className="border-t border-gray-200 dark:border-gray-700 px-8 py-4 flex items-center justify-end gap-4">
             <Link
-              to="/interfaces"
+              to={`/interfaces/${id}`}
               className="px-6 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
             >
               取消

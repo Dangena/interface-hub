@@ -3,6 +3,7 @@
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
     "target": "ES2020",
     "useDefineForClassFields": true,
+    "esModuleInterop": true,
     "lib": [
       "ES2020",
       "DOM",
@@ -22,7 +23,6 @@
     "noFallthroughCasesInSwitch": false,
     "noUncheckedSideEffectImports": false,
     "forceConsistentCasingInFileNames": false,
-    "baseUrl": "./",
     "paths": {
       "@/*": [
         "./src/*"
@@ -30,7 +30,8 @@
     },
     "types": [
       "node",
-      "express"
+      "express",
+      "jest"
     ]
   },
   "include": [

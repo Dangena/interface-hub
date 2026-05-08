@@ -5,6 +5,19 @@ import mappingsRouter from './mappings';
 import graphRouter from './graph';
 import statsRouter from './stats';
 import mockRouter from './mock';
+import importRouter from './import';
+import parserRouter from './parser';
+import docsRouter from './docs';
+import performanceRouter from './performance';
+import openapiRouter from './openapi';
+import projectsRouter from './projects';
+import approvalsRouter from './approvals';
+import notificationsRouter from './notifications';
+import webhooksRouter from './webhooks';
+import backupRouter from './backup';
+import tracingRouter from './tracing';
+import cicdRouter from './cicd';
+import dataSimulatorRouter from './dataSimulator';
 
 const router = Router();
 
@@ -14,5 +27,18 @@ router.use('/mappings', mappingsRouter);
 router.use('/graph', graphRouter);
 router.use('/stats', statsRouter);
 router.use('/mock', mockRouter);
+router.use('/import', importRouter);
+router.use('/parser', parserRouter);
+router.use('/docs', docsRouter);
+router.use('/performance', performanceRouter);
+router.use('/openapi', openapiRouter);
+router.use('/projects', projectsRouter);
+router.use('/approvals', approvalsRouter);
+router.use('/notifications', notificationsRouter);
+router.use('/webhooks', webhooksRouter);
+router.use('/backup', backupRouter);
+router.use('/tracing', tracingRouter);
+router.use('/cicd', cicdRouter);
+router.use('/data-simulator', dataSimulatorRouter);
 
 export default router;

@@ -1,18 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Plus, Search, Filter, Edit, Trash2, Eye } from 'lucide-react';
+import { Plus, Search, Filter, Edit, Trash2, Eye, ChevronLeft, ChevronRight } from 'lucide-react';
 import api from '../services/api';
-
-interface Interface {
-  id: string;
-  name: string;
-  path: string;
-  method: string;
-  description: string;
-  status: string;
-  category: string;
-  tags: string[];
-}
+import { toast } from '../components/Toast';
+import ConfirmDialog from '../components/ConfirmDialog';
 
 const methodColors: Record<string, string> = {
   GET: 'bg-green-100 text-green-700 dark:bg-green-900/20 dark:text-green-400',
@@ -29,44 +20,54 @@ const statusColors: Record<string, string> = {
 };
 
 export default function InterfaceList() {
-  const [interfaces, setInterfaces] = useState<Interface[]>([]);
+  const [interfaces, setInterfaces] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
 
   useEffect(() => {
     loadInterfaces();
-  }, []);
+  }, [page, statusFilter]);
 
   const loadInterfaces = async () => {
+    setLoading(true);
     try {
-      const data = await api.get('/interfaces');
-      setInterfaces(data);
+      const params = new URLSearchParams();
+      if (searchTerm) params.set('search', searchTerm);
+      if (statusFilter) params.set('status', statusFilter);
+      params.set('page', page.toString());
+      params.set('limit', '20');
+      const data = await api.get(`/interfaces?${params.toString()}`);
+      if (data.data) {
+        setInterfaces(data.data);
+        setTotalPages(data.pagination.totalPages);
+        setTotal(data.pagination.total);
+      } else {
+        setInterfaces(Array.isArray(data) ? data : []);
+      }
     } catch (error) {
-      console.error('Failed to load interfaces:', error);
+      toast('error', '加载接口列表失败');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleDelete = async (id: string) => {
-    if (confirm('确定要删除这个接口吗？')) {
-      try {
-        await api.delete(`/interfaces/${id}`);
-        loadInterfaces();
-      } catch (error) {
-        console.error('Failed to delete interface:', error);
-      }
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    try {
+      await api.delete(`/interfaces/${deleteTarget.id}`);
+      toast('success', `接口 "${deleteTarget.name}" 已删除`);
+      loadInterfaces();
+    } catch {
+      toast('error', '删除接口失败');
+    } finally {
+      setDeleteTarget(null);
     }
   };
-
-  const filteredInterfaces = interfaces.filter((iface) => {
-    const matchesSearch =
-      iface.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      iface.path.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesStatus = !statusFilter || iface.status === statusFilter;
-    return matchesSearch && matchesStatus;
-  });
 
   if (loading) {
     return (
@@ -82,7 +83,7 @@ export default function InterfaceList() {
         <div>
           <h1 className="text-3xl font-bold text-gray-900 dark:text-white">接口管理</h1>
           <p className="text-gray-600 dark:text-gray-400 mt-2">
-            管理和查看所有 API 接口
+            管理和查看所有 API 接口 · 共 {total} 个
           </p>
         </div>
         <Link
@@ -101,13 +102,14 @@ export default function InterfaceList() {
             type="text"
             placeholder="搜索接口名称或路径..."
             value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
+            onChange={(e) => { setSearchTerm(e.target.value); setPage(1); }}
+            onKeyDown={(e) => e.key === 'Enter' && loadInterfaces()}
             className="w-full pl-10 pr-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
           />
         </div>
         <select
           value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
+          onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}
           className="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500"
         >
           <option value="">全部状态</option>
@@ -121,84 +123,39 @@ export default function InterfaceList() {
         <table className="w-full">
           <thead className="bg-gray-50 dark:bg-gray-700">
             <tr>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                接口名称
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                方法
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                路径
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                状态
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                分类
-              </th>
-              <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                操作
-              </th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">接口名称</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">方法</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">路径</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">状态</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">分类</th>
+              <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">操作</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-            {filteredInterfaces.map((iface) => (
+            {interfaces.map((iface: any) => (
               <tr key={iface.id} className="hover:bg-gray-50 dark:hover:bg-gray-700">
                 <td className="px-6 py-4 whitespace-nowrap">
-                  <div className="text-sm font-medium text-gray-900 dark:text-white">
-                    {iface.name}
-                  </div>
+                  <div className="text-sm font-medium text-gray-900 dark:text-white">{iface.name}</div>
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap">
-                  <span
-                    className={`px-2 py-1 rounded text-xs font-medium ${
-                      methodColors[iface.method] || 'bg-gray-100 text-gray-700'
-                    }`}
-                  >
+                  <span className={`px-2 py-1 rounded text-xs font-medium ${methodColors[iface.method] || 'bg-gray-100 text-gray-700'}`}>
                     {iface.method}
                   </span>
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap">
-                  <code className="text-sm text-gray-600 dark:text-gray-400">
-                    {iface.path}
-                  </code>
+                  <code className="text-sm text-gray-600 dark:text-gray-400">{iface.path}</code>
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap">
-                  <span
-                    className={`px-2 py-1 rounded text-xs font-medium ${
-                      statusColors[iface.status] || 'bg-gray-100 text-gray-700'
-                    }`}
-                  >
-                    {iface.status === 'published'
-                      ? '已发布'
-                      : iface.status === 'draft'
-                      ? '开发中'
-                      : '已弃用'}
+                  <span className={`px-2 py-1 rounded text-xs font-medium ${statusColors[iface.status] || 'bg-gray-100 text-gray-700'}`}>
+                    {iface.status === 'published' ? '已发布' : iface.status === 'draft' ? '开发中' : '已弃用'}
                   </span>
                 </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600 dark:text-gray-400">
-                  {iface.category || '-'}
-                </td>
+                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600 dark:text-gray-400">{iface.category || '-'}</td>
                 <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                   <div className="flex items-center justify-end gap-2">
-                    <Link
-                      to={`/interfaces/${iface.id}`}
-                      className="text-blue-600 hover:text-blue-900 dark:text-blue-400"
-                    >
-                      <Eye className="w-5 h-5" />
-                    </Link>
-                    <Link
-                      to={`/interfaces/${iface.id}/edit`}
-                      className="text-gray-600 hover:text-gray-900 dark:text-gray-400"
-                    >
-                      <Edit className="w-5 h-5" />
-                    </Link>
-                    <button
-                      onClick={() => handleDelete(iface.id)}
-                      className="text-red-600 hover:text-red-900 dark:text-red-400"
-                    >
-                      <Trash2 className="w-5 h-5" />
-                    </button>
+                    <Link to={`/interfaces/${iface.id}`} className="text-blue-600 hover:text-blue-900 dark:text-blue-400"><Eye className="w-5 h-5" /></Link>
+                    <Link to={`/interfaces/${iface.id}/edit`} className="text-gray-600 hover:text-gray-900 dark:text-gray-400"><Edit className="w-5 h-5" /></Link>
+                    <button onClick={() => setDeleteTarget({ id: iface.id, name: iface.name })} className="text-red-600 hover:text-red-900 dark:text-red-400"><Trash2 className="w-5 h-5" /></button>
                   </div>
                 </td>
               </tr>
@@ -206,19 +163,37 @@ export default function InterfaceList() {
           </tbody>
         </table>
 
-        {filteredInterfaces.length === 0 && (
+        {interfaces.length === 0 && (
           <div className="text-center py-12">
             <p className="text-gray-500 dark:text-gray-400">暂无接口数据</p>
-            <Link
-              to="/interfaces/new"
-              className="mt-4 inline-flex items-center gap-2 text-blue-600 hover:text-blue-700"
-            >
-              <Plus className="w-4 h-4" />
-              创建第一个接口
+            <Link to="/interfaces/new" className="mt-4 inline-flex items-center gap-2 text-blue-600 hover:text-blue-700">
+              <Plus className="w-4 h-4" />创建第一个接口
             </Link>
           </div>
         )}
+
+        {totalPages > 1 && (
+          <div className="flex items-center justify-between px-6 py-3 border-t border-gray-200 dark:border-gray-700">
+            <p className="text-sm text-gray-500 dark:text-gray-400">第 {page} 页，共 {totalPages} 页</p>
+            <div className="flex gap-2">
+              <button onClick={() => setPage(Math.max(1, page - 1))} disabled={page === 1} className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-30">
+                <ChevronLeft className="w-5 h-5" />
+              </button>
+              <button onClick={() => setPage(Math.min(totalPages, page + 1))} disabled={page === totalPages} className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-30">
+                <ChevronRight className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+        )}
       </div>
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="删除接口"
+        message={`确定要删除接口 "${deleteTarget?.name}" 吗？此操作将同时删除关联的参数、映射和Mock配置，且不可恢复。`}
+        onConfirm={handleDelete}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }

@@ -189,8 +189,11 @@ export default function MockServer() {
                     value={formData.path}
                     onChange={(e) => setFormData({ ...formData, path: e.target.value })}
                     className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                    placeholder="/api/users"
+                    placeholder="/api/users 或 /api/users/:id"
                   />
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    支持 :param 或 {'{param}'} 路径参数，响应中可用 {'{param}'} 引用参数值
+                  </p>
                 </div>
 
                 <div>

@@ -1,5 +1,6 @@
 import db from './database';
 import { v4 as uuidv4 } from 'uuid';
+import bcrypt from 'bcryptjs';
 
 export function initializeSampleData() {
   const count = db.prepare('SELECT COUNT(*) as count FROM interfaces').get() as any;
@@ -11,6 +12,13 @@ export function initializeSampleData() {
   console.log('Initializing sample data...');
 
   const now = new Date().toISOString();
+
+  const adminId = uuidv4();
+  const hashedPassword = bcrypt.hashSync('admin123', 10);
+  db.prepare(`
+    INSERT INTO users (id, email, name, password_hash, role, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(adminId, 'admin@test.com', 'Admin', hashedPassword, 'admin', now, now);
 
   const interfaces = [
     {
@@ -119,7 +127,7 @@ export function initializeSampleData() {
       iface.tags,
       iface.status,
       iface.version,
-      'system',
+      adminId,
       now,
       now
     );
