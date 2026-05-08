@@ -4,29 +4,32 @@ import db from '../database';
 
 const router = Router();
 
-interface AlertRule {
-  id: string;
-  name: string;
-  type: 'response_time' | 'error_rate' | 'health_check';
-  threshold: number;
-  window: number;
-  enabled: boolean;
-  lastTriggered: string | null;
-  createdAt: string;
+function mapRuleRow(row: any) {
+  return {
+    id: row.id,
+    name: row.name,
+    type: row.type,
+    threshold: row.threshold,
+    window: row.window,
+    enabled: Boolean(row.enabled),
+    lastTriggered: row.last_triggered,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
-interface AlertHistoryEntry {
-  id: string;
-  alertId: string;
-  alertName: string;
-  type: string;
-  threshold: number;
-  actualValue: number;
-  triggeredAt: string;
+function mapHistoryRow(row: any) {
+  return {
+    id: row.id,
+    alertId: row.rule_id,
+    alertName: row.alert_name,
+    type: row.alert_type,
+    threshold: row.threshold,
+    actualValue: row.metric_value,
+    triggeredAt: row.triggered_at,
+    message: row.message,
+  };
 }
-
-const alertRules = new Map<string, AlertRule>();
-const alertHistory: AlertHistoryEntry[] = [];
 
 router.get('/health', (req, res) => {
   try {
@@ -171,8 +174,8 @@ router.get('/metrics/timeline', (req, res) => {
 
 router.get('/alerts', (req, res) => {
   try {
-    const rules = Array.from(alertRules.values());
-    res.json(rules);
+    const rules = db.prepare('SELECT * FROM alert_rules ORDER BY created_at DESC').all() as any[];
+    res.json(rules.map(mapRuleRow));
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch alert rules' });
   }
@@ -192,20 +195,16 @@ router.post('/alerts', (req, res) => {
 
     const id = uuidv4();
     const now = new Date().toISOString();
+    const enabledVal = enabled !== undefined ? (Boolean(enabled) ? 1 : 0) : 1;
+    const windowVal = Number(window) || 5;
 
-    const rule: AlertRule = {
-      id,
-      name,
-      type,
-      threshold: Number(threshold),
-      window: Number(window) || 5,
-      enabled: enabled !== undefined ? Boolean(enabled) : true,
-      lastTriggered: null,
-      createdAt: now,
-    };
+    db.prepare(`
+      INSERT INTO alert_rules (id, name, type, threshold, window, enabled, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, name, type, Number(threshold), windowVal, enabledVal, now, now);
 
-    alertRules.set(id, rule);
-    res.status(201).json(rule);
+    const rule = db.prepare('SELECT * FROM alert_rules WHERE id = ?').get(id) as any;
+    res.status(201).json(mapRuleRow(rule));
   } catch (error) {
     res.status(500).json({ error: 'Failed to create alert rule' });
   }
@@ -214,7 +213,7 @@ router.post('/alerts', (req, res) => {
 router.put('/alerts/:id', (req, res) => {
   try {
     const { id } = req.params;
-    const existing = alertRules.get(id);
+    const existing = db.prepare('SELECT * FROM alert_rules WHERE id = ?').get(id) as any;
 
     if (!existing) {
       return res.status(404).json({ error: 'Alert rule not found' });
@@ -226,17 +225,21 @@ router.put('/alerts/:id', (req, res) => {
       return res.status(400).json({ error: 'type must be response_time, error_rate, or health_check' });
     }
 
-    const updated: AlertRule = {
-      ...existing,
-      name: name !== undefined ? name : existing.name,
-      type: type !== undefined ? type : existing.type,
-      threshold: threshold !== undefined ? Number(threshold) : existing.threshold,
-      window: window !== undefined ? Number(window) : existing.window,
-      enabled: enabled !== undefined ? Boolean(enabled) : existing.enabled,
-    };
+    const newName = name !== undefined ? name : existing.name;
+    const newType = type !== undefined ? type : existing.type;
+    const newThreshold = threshold !== undefined ? Number(threshold) : existing.threshold;
+    const newWindow = window !== undefined ? Number(window) : existing.window;
+    const newEnabled = enabled !== undefined ? (Boolean(enabled) ? 1 : 0) : existing.enabled;
+    const now = new Date().toISOString();
 
-    alertRules.set(id, updated);
-    res.json(updated);
+    db.prepare(`
+      UPDATE alert_rules
+      SET name = ?, type = ?, threshold = ?, window = ?, enabled = ?, updated_at = ?
+      WHERE id = ?
+    `).run(newName, newType, newThreshold, newWindow, newEnabled, now, id);
+
+    const updated = db.prepare('SELECT * FROM alert_rules WHERE id = ?').get(id) as any;
+    res.json(mapRuleRow(updated));
   } catch (error) {
     res.status(500).json({ error: 'Failed to update alert rule' });
   }
@@ -245,13 +248,15 @@ router.put('/alerts/:id', (req, res) => {
 router.delete('/alerts/:id', (req, res) => {
   try {
     const { id } = req.params;
-    const existing = alertRules.get(id);
+    const existing = db.prepare('SELECT * FROM alert_rules WHERE id = ?').get(id) as any;
 
     if (!existing) {
       return res.status(404).json({ error: 'Alert rule not found' });
     }
 
-    alertRules.delete(id);
+    db.prepare('DELETE FROM alert_history WHERE rule_id = ?').run(id);
+    db.prepare('DELETE FROM alert_rules WHERE id = ?').run(id);
+
     res.json({ message: 'Alert rule deleted successfully' });
   } catch (error) {
     res.status(500).json({ error: 'Failed to delete alert rule' });
@@ -261,14 +266,21 @@ router.delete('/alerts/:id', (req, res) => {
 router.get('/alerts/:id/history', (req, res) => {
   try {
     const { id } = req.params;
-    const existing = alertRules.get(id);
+    const existing = db.prepare('SELECT * FROM alert_rules WHERE id = ?').get(id) as any;
 
     if (!existing) {
       return res.status(404).json({ error: 'Alert rule not found' });
     }
 
-    const history = alertHistory.filter((entry) => entry.alertId === id);
-    res.json(history);
+    const history = db.prepare(`
+      SELECT ah.*, ar.name as alert_name, ar.type as alert_type
+      FROM alert_history ah
+      JOIN alert_rules ar ON ar.id = ah.rule_id
+      WHERE ah.rule_id = ?
+      ORDER BY ah.triggered_at DESC
+    `).all(id) as any[];
+
+    res.json(history.map(mapHistoryRow));
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch alert history' });
   }
@@ -276,73 +288,92 @@ router.get('/alerts/:id/history', (req, res) => {
 
 router.post('/alerts/check', (req, res) => {
   try {
-    const enabledRules = Array.from(alertRules.values()).filter((rule) => rule.enabled);
-    const triggeredAlerts: AlertHistoryEntry[] = [];
+    const enabledRules = db.prepare('SELECT * FROM alert_rules WHERE enabled = 1').all() as any[];
+    const triggeredAlerts: any[] = [];
     const now = new Date().toISOString();
 
-    for (const rule of enabledRules) {
-      let actualValue = 0;
-      let exceeded = false;
+    const insertHistory = db.prepare(`
+      INSERT INTO alert_history (id, rule_id, triggered_at, metric_value, threshold, message)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
 
-      switch (rule.type) {
-        case 'response_time': {
-          const windowMinutes = rule.window;
-          const result = db.prepare(`
-            SELECT AVG(response_time) as avg_response_time
-            FROM api_logs
-            WHERE created_at >= datetime('now', '-' || ? || ' minutes')
-          `).get(windowMinutes) as any;
-          actualValue = Math.round((result?.avg_response_time || 0) * 100) / 100;
-          exceeded = actualValue > rule.threshold;
-          break;
-        }
-        case 'error_rate': {
-          const windowMinutes = rule.window;
-          const result = db.prepare(`
-            SELECT
-              COUNT(*) as total,
-              SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) as errors
-            FROM api_logs
-            WHERE created_at >= datetime('now', '-' || ? || ' minutes')
-          `).get(windowMinutes) as any;
-          actualValue = result?.total > 0
-            ? Math.round((result.errors / result.total) * 10000) / 100
-            : 0;
-          exceeded = actualValue > rule.threshold;
-          break;
-        }
-        case 'health_check': {
-          try {
-            const start = Date.now();
-            db.prepare('SELECT 1').get();
-            actualValue = Date.now() - start;
+    const updateLastTriggered = db.prepare(`
+      UPDATE alert_rules SET last_triggered = ?, updated_at = ? WHERE id = ?
+    `);
+
+    const checkAndTrigger = db.transaction(() => {
+      for (const rule of enabledRules) {
+        let actualValue = 0;
+        let exceeded = false;
+        let message = '';
+
+        switch (rule.type) {
+          case 'response_time': {
+            const windowMinutes = rule.window;
+            const result = db.prepare(`
+              SELECT AVG(response_time) as avg_response_time
+              FROM api_logs
+              WHERE created_at >= datetime('now', '-' || ? || ' minutes')
+            `).get(windowMinutes) as any;
+            actualValue = Math.round((result?.avg_response_time || 0) * 100) / 100;
             exceeded = actualValue > rule.threshold;
-          } catch {
-            actualValue = -1;
-            exceeded = true;
+            message = `Response time ${actualValue}ms exceeds threshold ${rule.threshold}ms`;
+            break;
           }
-          break;
+          case 'error_rate': {
+            const windowMinutes = rule.window;
+            const result = db.prepare(`
+              SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) as errors
+              FROM api_logs
+              WHERE created_at >= datetime('now', '-' || ? || ' minutes')
+            `).get(windowMinutes) as any;
+            actualValue = result?.total > 0
+              ? Math.round((result.errors / result.total) * 10000) / 100
+              : 0;
+            exceeded = actualValue > rule.threshold;
+            message = `Error rate ${actualValue}% exceeds threshold ${rule.threshold}%`;
+            break;
+          }
+          case 'health_check': {
+            try {
+              const start = Date.now();
+              db.prepare('SELECT 1').get();
+              actualValue = Date.now() - start;
+              exceeded = actualValue > rule.threshold;
+              message = exceeded
+                ? `Health check response time ${actualValue}ms exceeds threshold ${rule.threshold}ms`
+                : '';
+            } catch {
+              actualValue = -1;
+              exceeded = true;
+              message = 'Health check failed - database unreachable';
+            }
+            break;
+          }
+        }
+
+        if (exceeded) {
+          const historyId = uuidv4();
+          insertHistory.run(historyId, rule.id, now, actualValue, rule.threshold, message);
+          updateLastTriggered.run(now, now, rule.id);
+
+          triggeredAlerts.push({
+            id: historyId,
+            alertId: rule.id,
+            alertName: rule.name,
+            type: rule.type,
+            threshold: rule.threshold,
+            actualValue,
+            triggeredAt: now,
+            message,
+          });
         }
       }
+    });
 
-      if (exceeded) {
-        const entry: AlertHistoryEntry = {
-          id: uuidv4(),
-          alertId: rule.id,
-          alertName: rule.name,
-          type: rule.type,
-          threshold: rule.threshold,
-          actualValue,
-          triggeredAt: now,
-        };
-
-        alertHistory.push(entry);
-        triggeredAlerts.push(entry);
-
-        rule.lastTriggered = now;
-        alertRules.set(rule.id, rule);
-      }
-    }
+    checkAndTrigger();
 
     res.json({
       checkedRules: enabledRules.length,
@@ -400,16 +431,23 @@ router.get('/dashboard', (req, res) => {
       errorCount: errorCount.count,
     };
 
-    const recentAlerts = alertHistory
-      .slice(-10)
-      .reverse();
+    const recentAlerts = db.prepare(`
+      SELECT ah.*, ar.name as alert_name, ar.type as alert_type
+      FROM alert_history ah
+      JOIN alert_rules ar ON ar.id = ah.rule_id
+      ORDER BY ah.triggered_at DESC
+      LIMIT 10
+    `).all() as any[];
+
+    const alertRulesCount = (db.prepare('SELECT COUNT(*) as count FROM alert_rules').get() as any).count;
+    const enabledAlertRulesCount = (db.prepare('SELECT COUNT(*) as count FROM alert_rules WHERE enabled = 1').get() as any).count;
 
     res.json({
       health,
       metrics,
-      recentAlerts,
-      alertRulesCount: alertRules.size,
-      enabledAlertRulesCount: Array.from(alertRules.values()).filter((r) => r.enabled).length,
+      recentAlerts: recentAlerts.map(mapHistoryRow),
+      alertRulesCount,
+      enabledAlertRulesCount,
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch dashboard data' });

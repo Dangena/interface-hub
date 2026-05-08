@@ -1,5 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { v4 as uuidv4 } from 'uuid';
+import db from '../database.js';
 
 const router = Router();
 
@@ -12,10 +13,15 @@ interface RateLimitRule {
   windowMs: number;
   strategy: 'fixed-window' | 'sliding-window' | 'token-bucket';
   enabled: boolean;
+  blockedCount: number;
   createdAt: string;
+  updatedAt: string;
 }
 
 interface RequestRecord {
+  id: string;
+  ruleId: string;
+  identifier: string;
   count: number;
   windowStart: number;
   tokens: number;
@@ -24,28 +30,67 @@ interface RequestRecord {
   prevWindowStart: number;
 }
 
-const rules = new Map<string, RateLimitRule>();
-const requestCounts = new Map<string, RequestRecord>();
-let totalBlockedRequests = 0;
-
-function getKey(ruleId: string, identifier: string): string {
-  return `${ruleId}:${identifier}`;
+function rowToRule(row: any): RateLimitRule {
+  return {
+    id: row.id,
+    name: row.name,
+    path: row.path,
+    method: row.method,
+    limit: row.limit_count,
+    windowMs: row.window_ms,
+    strategy: row.strategy,
+    enabled: Boolean(row.enabled),
+    blockedCount: row.blocked_count ?? 0,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
-function getOrCreateRecord(key: string, now: number, rule: RateLimitRule): RequestRecord {
-  let record = requestCounts.get(key);
-  if (!record) {
-    record = {
-      count: 0,
-      windowStart: now,
-      tokens: rule.limit,
-      lastRefill: now,
-      prevCount: 0,
-      prevWindowStart: now - rule.windowMs,
-    };
-    requestCounts.set(key, record);
+function rowToRecord(row: any): RequestRecord {
+  return {
+    id: row.id,
+    ruleId: row.rule_id,
+    identifier: row.identifier,
+    count: row.count,
+    windowStart: row.window_start,
+    tokens: row.tokens,
+    lastRefill: row.last_refill,
+    prevCount: row.prev_count,
+    prevWindowStart: row.prev_window_start,
+  };
+}
+
+function getRuleById(id: string): RateLimitRule | undefined {
+  const row = db.prepare('SELECT * FROM rate_limit_rules WHERE id = ?').get(id);
+  return row ? rowToRule(row) : undefined;
+}
+
+function getOrCreateRecord(ruleId: string, identifier: string, now: number, rule: RateLimitRule): RequestRecord {
+  const existing = db.prepare('SELECT * FROM rate_limit_counts WHERE rule_id = ? AND identifier = ?').get(ruleId, identifier);
+  if (existing) {
+    return rowToRecord(existing);
   }
-  return record;
+  const id = uuidv4();
+  db.prepare(
+    'INSERT INTO rate_limit_counts (id, rule_id, identifier, count, window_start, tokens, last_refill, prev_count, prev_window_start) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(id, ruleId, identifier, 0, now, rule.limit, now, 0, now - rule.windowMs);
+  return {
+    id,
+    ruleId,
+    identifier,
+    count: 0,
+    windowStart: now,
+    tokens: rule.limit,
+    lastRefill: now,
+    prevCount: 0,
+    prevWindowStart: now - rule.windowMs,
+  };
+}
+
+function saveRecord(record: RequestRecord): void {
+  db.prepare(
+    'UPDATE rate_limit_counts SET count = ?, window_start = ?, tokens = ?, last_refill = ?, prev_count = ?, prev_window_start = ? WHERE id = ?'
+  ).run(record.count, record.windowStart, record.tokens, record.lastRefill, record.prevCount, record.prevWindowStart, record.id);
 }
 
 function checkFixedWindow(record: RequestRecord, rule: RateLimitRule, now: number): { allowed: boolean; record: RequestRecord } {
@@ -88,14 +133,13 @@ function checkTokenBucket(record: RequestRecord, rule: RateLimitRule, now: numbe
 }
 
 function checkRateLimit(ruleId: string, identifier: string): { allowed: boolean; currentCount: number; remaining: number; resetAt: string } {
-  const rule = rules.get(ruleId);
+  const rule = getRuleById(ruleId);
   if (!rule || !rule.enabled) {
     return { allowed: true, currentCount: 0, remaining: rule?.limit ?? 0, resetAt: new Date(Date.now() + (rule?.windowMs ?? 0)).toISOString() };
   }
 
   const now = Date.now();
-  const key = getKey(ruleId, identifier);
-  const record = getOrCreateRecord(key, now, rule);
+  const record = getOrCreateRecord(ruleId, identifier, now, rule);
 
   let result: { allowed: boolean; record: RequestRecord };
 
@@ -110,10 +154,10 @@ function checkRateLimit(ruleId: string, identifier: string): { allowed: boolean;
       result = checkFixedWindow(record, rule, now);
   }
 
-  requestCounts.set(key, result.record);
+  saveRecord(result.record);
 
   if (!result.allowed) {
-    totalBlockedRequests++;
+    db.prepare('UPDATE rate_limit_rules SET blocked_count = blocked_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(ruleId);
   }
 
   const currentCount = rule.strategy === 'token-bucket' ? rule.limit - Math.floor(result.record.tokens) : result.record.count;
@@ -125,8 +169,8 @@ function checkRateLimit(ruleId: string, identifier: string): { allowed: boolean;
 
 router.get('/rules', (_req: Request, res: Response) => {
   try {
-    const allRules = Array.from(rules.values());
-    res.json(allRules);
+    const rows = db.prepare('SELECT * FROM rate_limit_rules ORDER BY created_at DESC').all();
+    res.json(rows.map(rowToRule));
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch rate limit rules' });
   }
@@ -146,19 +190,13 @@ router.post('/rules', (req: Request, res: Response) => {
     }
 
     const id = uuidv4();
-    const rule: RateLimitRule = {
-      id,
-      name,
-      path,
-      method: method.toUpperCase(),
-      limit: Number(limit),
-      windowMs: Number(windowMs),
-      strategy,
-      enabled: enabled !== undefined ? Boolean(enabled) : true,
-      createdAt: new Date().toISOString(),
-    };
+    const enabledVal = enabled !== undefined ? (Boolean(enabled) ? 1 : 0) : 1;
 
-    rules.set(id, rule);
+    db.prepare(
+      'INSERT INTO rate_limit_rules (id, name, path, method, limit_count, window_ms, strategy, enabled, blocked_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)'
+    ).run(id, name, path, method.toUpperCase(), Number(limit), Number(windowMs), strategy, enabledVal);
+
+    const rule = getRuleById(id);
     res.status(201).json(rule);
   } catch (error) {
     res.status(500).json({ error: 'Failed to create rate limit rule' });
@@ -168,7 +206,7 @@ router.post('/rules', (req: Request, res: Response) => {
 router.put('/rules/:id', (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const existing = rules.get(id);
+    const existing = getRuleById(id);
 
     if (!existing) {
       return res.status(404).json({ error: 'Rate limit rule not found' });
@@ -183,18 +221,24 @@ router.put('/rules/:id', (req: Request, res: Response) => {
       }
     }
 
-    const updated: RateLimitRule = {
-      ...existing,
-      ...(name !== undefined && { name }),
-      ...(path !== undefined && { path }),
-      ...(method !== undefined && { method: method.toUpperCase() }),
-      ...(limit !== undefined && { limit: Number(limit) }),
-      ...(windowMs !== undefined && { windowMs: Number(windowMs) }),
-      ...(strategy !== undefined && { strategy }),
-      ...(enabled !== undefined && { enabled: Boolean(enabled) }),
-    };
+    const updates: string[] = [];
+    const values: any[] = [];
 
-    rules.set(id, updated);
+    if (name !== undefined) { updates.push('name = ?'); values.push(name); }
+    if (path !== undefined) { updates.push('path = ?'); values.push(path); }
+    if (method !== undefined) { updates.push('method = ?'); values.push(method.toUpperCase()); }
+    if (limit !== undefined) { updates.push('limit_count = ?'); values.push(Number(limit)); }
+    if (windowMs !== undefined) { updates.push('window_ms = ?'); values.push(Number(windowMs)); }
+    if (strategy !== undefined) { updates.push('strategy = ?'); values.push(strategy); }
+    if (enabled !== undefined) { updates.push('enabled = ?'); values.push(Boolean(enabled) ? 1 : 0); }
+
+    if (updates.length > 0) {
+      updates.push('updated_at = CURRENT_TIMESTAMP');
+      values.push(id);
+      db.prepare(`UPDATE rate_limit_rules SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+    }
+
+    const updated = getRuleById(id);
     res.json(updated);
   } catch (error) {
     res.status(500).json({ error: 'Failed to update rate limit rule' });
@@ -204,17 +248,14 @@ router.put('/rules/:id', (req: Request, res: Response) => {
 router.delete('/rules/:id', (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    if (!rules.has(id)) {
+    const existing = getRuleById(id);
+
+    if (!existing) {
       return res.status(404).json({ error: 'Rate limit rule not found' });
     }
 
-    rules.delete(id);
-
-    for (const key of Array.from(requestCounts.keys())) {
-      if (key.startsWith(`${id}:`)) {
-        requestCounts.delete(key);
-      }
-    }
+    db.prepare('DELETE FROM rate_limit_counts WHERE rule_id = ?').run(id);
+    db.prepare('DELETE FROM rate_limit_rules WHERE id = ?').run(id);
 
     res.json({ message: 'Rate limit rule deleted' });
   } catch (error) {
@@ -225,31 +266,31 @@ router.delete('/rules/:id', (req: Request, res: Response) => {
 router.get('/rules/:id/stats', (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const rule = rules.get(id);
+    const rule = getRuleById(id);
 
     if (!rule) {
       return res.status(404).json({ error: 'Rate limit rule not found' });
     }
 
+    const rows = db.prepare('SELECT * FROM rate_limit_counts WHERE rule_id = ?').all(id);
     const now = Date.now();
     let totalCurrentCount = 0;
     let minRemaining = rule.limit;
     let earliestResetAt = now + rule.windowMs;
 
-    for (const [key, record] of Array.from(requestCounts.entries())) {
-      if (key.startsWith(`${id}:`)) {
-        const currentCount = rule.strategy === 'token-bucket'
-          ? rule.limit - Math.floor(record.tokens)
-          : record.count;
-        const remaining = rule.strategy === 'token-bucket'
-          ? Math.floor(record.tokens)
-          : Math.max(0, rule.limit - currentCount);
-        const resetAt = record.windowStart + rule.windowMs;
+    for (const row of rows) {
+      const record = rowToRecord(row);
+      const currentCount = rule.strategy === 'token-bucket'
+        ? rule.limit - Math.floor(record.tokens)
+        : record.count;
+      const remaining = rule.strategy === 'token-bucket'
+        ? Math.floor(record.tokens)
+        : Math.max(0, rule.limit - currentCount);
+      const resetAt = record.windowStart + rule.windowMs;
 
-        totalCurrentCount += currentCount;
-        if (remaining < minRemaining) minRemaining = remaining;
-        if (resetAt < earliestResetAt) earliestResetAt = resetAt;
-      }
+      totalCurrentCount += currentCount;
+      if (remaining < minRemaining) minRemaining = remaining;
+      if (resetAt < earliestResetAt) earliestResetAt = resetAt;
     }
 
     res.json({
@@ -266,13 +307,16 @@ router.post('/middleware', (req: Request, res: Response) => {
   try {
     const { ruleIds } = req.body as { ruleIds?: string[] };
 
-    const targetRuleIds = ruleIds && ruleIds.length > 0
-      ? ruleIds
-      : Array.from(rules.keys());
+    let validRules: RateLimitRule[];
 
-    const validRules = targetRuleIds
-      .map((rid: string) => rules.get(rid))
-      .filter((r: RateLimitRule | undefined): r is RateLimitRule => !!r && r.enabled);
+    if (ruleIds && ruleIds.length > 0) {
+      const placeholders = ruleIds.map(() => '?').join(',');
+      const rows = db.prepare(`SELECT * FROM rate_limit_rules WHERE id IN (${placeholders}) AND enabled = 1`).all(...ruleIds);
+      validRules = rows.map(rowToRule);
+    } else {
+      const rows = db.prepare('SELECT * FROM rate_limit_rules WHERE enabled = 1').all();
+      validRules = rows.map(rowToRule);
+    }
 
     const middlewareConfig = {
       rules: validRules.map(r => ({
@@ -295,14 +339,14 @@ router.post('/middleware', (req: Request, res: Response) => {
 
 router.get('/stats', (_req: Request, res: Response) => {
   try {
-    const allRules = Array.from(rules.values());
-    const totalRules = allRules.length;
-    const activeRules = allRules.filter(r => r.enabled).length;
+    const totalRules = db.prepare('SELECT COUNT(*) as count FROM rate_limit_rules').get() as any;
+    const activeRules = db.prepare('SELECT COUNT(*) as count FROM rate_limit_rules WHERE enabled = 1').get() as any;
+    const blockedResult = db.prepare('SELECT COALESCE(SUM(blocked_count), 0) as total FROM rate_limit_rules').get() as any;
 
     res.json({
-      totalRules,
-      activeRules,
-      totalBlockedRequests,
+      totalRules: totalRules.count,
+      activeRules: activeRules.count,
+      totalBlockedRequests: blockedResult.total,
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch overall stats' });
@@ -310,8 +354,10 @@ router.get('/stats', (_req: Request, res: Response) => {
 });
 
 export function rateLimitMiddleware(req: Request, res: Response, next: NextFunction): void {
-  const matchingRules = Array.from(rules.values()).filter(r => {
-    if (!r.enabled) return false;
+  const rows = db.prepare('SELECT * FROM rate_limit_rules WHERE enabled = 1').all();
+  const allRules = rows.map(rowToRule);
+
+  const matchingRules = allRules.filter(r => {
     if (r.method !== '*' && r.method !== req.method.toUpperCase()) return false;
     return req.path.startsWith(r.path) || r.path === '*';
   });
@@ -345,5 +391,5 @@ export function rateLimitMiddleware(req: Request, res: Response, next: NextFunct
   next();
 }
 
-export { rules, requestCounts, totalBlockedRequests, checkRateLimit };
+export { checkRateLimit };
 export default router;

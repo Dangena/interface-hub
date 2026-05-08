@@ -4,19 +4,6 @@ import db from '../database.js';
 
 const router = Router();
 
-const favorites = new Set<string>();
-
-interface Review {
-  id: string;
-  apiId: string;
-  userId: string;
-  rating: number;
-  comment: string;
-  createdAt: string;
-}
-
-const reviews = new Map<string, Review>();
-
 router.get('/apis', (req: Request, res: Response) => {
   try {
     const {
@@ -116,6 +103,7 @@ router.get('/apis', (req: Request, res: Response) => {
 router.get('/apis/:id', (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    const userId = req.query.userId as string;
 
     const row = db.prepare(
       `SELECT i.* FROM interfaces i WHERE i.id = ? AND i.status = 'published'`
@@ -148,10 +136,20 @@ router.get('/apis/:id', (req: Request, res: Response) => {
        LIMIT 5`
     ).all(row.category, id) as any[];
 
-    const apiReviews = Array.from(reviews.values()).filter(r => r.apiId === id);
-    const avgRating = apiReviews.length > 0
-      ? apiReviews.reduce((sum, r) => sum + r.rating, 0) / apiReviews.length
-      : 0;
+    const reviewStats = db.prepare(
+      `SELECT
+         COALESCE(AVG(rating), 0) as avgRating,
+         COUNT(*) as reviewCount
+       FROM api_reviews WHERE interface_id = ?`
+    ).get(id) as { avgRating: number; reviewCount: number };
+
+    let isFavorited = false;
+    if (userId) {
+      const fav = db.prepare(
+        `SELECT id FROM api_favorites WHERE user_id = ? AND interface_id = ?`
+      ).get(userId, id);
+      isFavorited = !!fav;
+    }
 
     res.json({
       id: row.id,
@@ -174,8 +172,9 @@ router.get('/apis/:id', (req: Request, res: Response) => {
         errorCount: usageStats?.errorCount || 0,
         lastCalledAt: usageStats?.lastCalledAt || null,
       },
-      avgRating: Math.round(avgRating * 10) / 10,
-      reviewCount: apiReviews.length,
+      avgRating: Math.round(reviewStats.avgRating * 10) / 10,
+      reviewCount: reviewStats.reviewCount,
+      isFavorited,
       relatedApis,
     });
   } catch (error) {
@@ -200,14 +199,19 @@ router.post('/apis/:id/favorite', (req: Request, res: Response) => {
       return res.status(404).json({ error: 'API not found' });
     }
 
-    const key = `${userId}:${id}`;
-    const isFavorited = favorites.has(key);
+    const existing = db.prepare(
+      `SELECT id FROM api_favorites WHERE user_id = ? AND interface_id = ?`
+    ).get(userId, id);
 
-    if (isFavorited) {
-      favorites.delete(key);
+    if (existing) {
+      db.prepare(
+        `DELETE FROM api_favorites WHERE user_id = ? AND interface_id = ?`
+      ).run(userId, id);
       res.json({ favorited: false });
     } else {
-      favorites.add(key);
+      db.prepare(
+        `INSERT INTO api_favorites (id, user_id, interface_id) VALUES (?, ?, ?)`
+      ).run(uuidv4(), userId, id);
       res.json({ favorited: true });
     }
   } catch (error) {
@@ -415,7 +419,7 @@ router.get('/recommended', (req: Request, res: Response) => {
 router.post('/apis/:id/review', (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { userId, rating, comment } = req.body;
+    const { userId, userName, rating, comment } = req.body;
 
     if (!userId) {
       return res.status(400).json({ error: 'userId is required' });
@@ -434,18 +438,22 @@ router.post('/apis/:id/review', (req: Request, res: Response) => {
     }
 
     const reviewId = uuidv4();
-    const review: Review = {
+    const roundedRating = Math.round(rating);
+
+    db.prepare(
+      `INSERT INTO api_reviews (id, interface_id, user_id, user_name, rating, comment)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(reviewId, id, userId, userName || null, roundedRating, comment || null);
+
+    res.status(201).json({
       id: reviewId,
       apiId: id,
       userId,
-      rating: Math.round(rating),
-      comment: comment || '',
+      userName: userName || null,
+      rating: roundedRating,
+      comment: comment || null,
       createdAt: new Date().toISOString(),
-    };
-
-    reviews.set(reviewId, review);
-
-    res.status(201).json(review);
+    });
   } catch (error) {
     res.status(500).json({ error: 'Failed to submit review' });
   }
@@ -455,25 +463,47 @@ router.get('/apis/:id/reviews', (req: Request, res: Response) => {
   try {
     const { id } = req.params;
 
-    const apiReviews = Array.from(reviews.values())
-      .filter(r => r.apiId === id)
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    const apiReviews = db.prepare(
+      `SELECT id, interface_id, user_id, user_name, rating, comment, created_at
+       FROM api_reviews
+       WHERE interface_id = ?
+       ORDER BY created_at DESC`
+    ).all(id) as any[];
 
-    const avgRating = apiReviews.length > 0
-      ? apiReviews.reduce((sum, r) => sum + r.rating, 0) / apiReviews.length
-      : 0;
+    const summaryRow = db.prepare(
+      `SELECT
+         COUNT(*) as totalReviews,
+         COALESCE(AVG(rating), 0) as avgRating,
+         SUM(CASE WHEN rating = 5 THEN 1 ELSE 0 END) as r5,
+         SUM(CASE WHEN rating = 4 THEN 1 ELSE 0 END) as r4,
+         SUM(CASE WHEN rating = 3 THEN 1 ELSE 0 END) as r3,
+         SUM(CASE WHEN rating = 2 THEN 1 ELSE 0 END) as r2,
+         SUM(CASE WHEN rating = 1 THEN 1 ELSE 0 END) as r1
+       FROM api_reviews
+       WHERE interface_id = ?`
+    ).get(id) as any;
+
+    const reviewsList = apiReviews.map(r => ({
+      id: r.id,
+      apiId: r.interface_id,
+      userId: r.user_id,
+      userName: r.user_name,
+      rating: r.rating,
+      comment: r.comment,
+      createdAt: r.created_at,
+    }));
 
     res.json({
-      reviews: apiReviews,
+      reviews: reviewsList,
       summary: {
-        totalReviews: apiReviews.length,
-        avgRating: Math.round(avgRating * 10) / 10,
+        totalReviews: summaryRow?.totalReviews || 0,
+        avgRating: Math.round((summaryRow?.avgRating || 0) * 10) / 10,
         ratingDistribution: {
-          5: apiReviews.filter(r => r.rating === 5).length,
-          4: apiReviews.filter(r => r.rating === 4).length,
-          3: apiReviews.filter(r => r.rating === 3).length,
-          2: apiReviews.filter(r => r.rating === 2).length,
-          1: apiReviews.filter(r => r.rating === 1).length,
+          5: summaryRow?.r5 || 0,
+          4: summaryRow?.r4 || 0,
+          3: summaryRow?.r3 || 0,
+          2: summaryRow?.r2 || 0,
+          1: summaryRow?.r1 || 0,
         },
       },
     });

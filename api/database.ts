@@ -278,4 +278,181 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_traces_operation ON traces(operation_name);
 `);
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS gateway_routes (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    path TEXT NOT NULL,
+    target TEXT NOT NULL,
+    methods TEXT NOT NULL,
+    enabled INTEGER DEFAULT 1,
+    rate_limit INTEGER,
+    strip_prefix INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS gateway_stats (
+    id TEXT PRIMARY KEY,
+    route_id TEXT NOT NULL,
+    total_requests INTEGER DEFAULT 0,
+    success_count INTEGER DEFAULT 0,
+    error_count INTEGER DEFAULT 0,
+    total_response_time INTEGER DEFAULT 0,
+    last_request_at DATETIME,
+    FOREIGN KEY (route_id) REFERENCES gateway_routes(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS rate_limit_rules (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    path TEXT NOT NULL,
+    method TEXT NOT NULL,
+    limit_count INTEGER NOT NULL,
+    window_ms INTEGER NOT NULL,
+    strategy TEXT NOT NULL DEFAULT 'fixed-window',
+    enabled INTEGER DEFAULT 1,
+    blocked_count INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS rate_limit_counts (
+    id TEXT PRIMARY KEY,
+    rule_id TEXT NOT NULL,
+    identifier TEXT NOT NULL,
+    count INTEGER DEFAULT 0,
+    window_start INTEGER NOT NULL,
+    tokens REAL,
+    last_refill INTEGER,
+    prev_count INTEGER DEFAULT 0,
+    prev_window_start INTEGER DEFAULT 0,
+    FOREIGN KEY (rule_id) REFERENCES rate_limit_rules(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS test_suites (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    interface_ids TEXT NOT NULL,
+    schedule TEXT,
+    enabled INTEGER DEFAULT 1,
+    last_run_at DATETIME,
+    last_result TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS test_results (
+    id TEXT PRIMARY KEY,
+    suite_id TEXT NOT NULL,
+    total_tests INTEGER DEFAULT 0,
+    passed INTEGER DEFAULT 0,
+    failed INTEGER DEFAULT 0,
+    results TEXT NOT NULL,
+    started_at DATETIME,
+    completed_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (suite_id) REFERENCES test_suites(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS workflows (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    steps TEXT NOT NULL,
+    status TEXT DEFAULT 'draft',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS workflow_executions (
+    id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    step_results TEXT,
+    error TEXT,
+    started_at DATETIME,
+    completed_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS i18n_translations (
+    id TEXT PRIMARY KEY,
+    locale TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(locale, namespace, key)
+  );
+
+  CREATE TABLE IF NOT EXISTS alert_rules (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    type TEXT NOT NULL,
+    threshold REAL NOT NULL,
+    window INTEGER DEFAULT 5,
+    enabled INTEGER DEFAULT 1,
+    last_triggered DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS alert_history (
+    id TEXT PRIMARY KEY,
+    rule_id TEXT NOT NULL,
+    triggered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    metric_value REAL,
+    threshold REAL,
+    message TEXT,
+    FOREIGN KEY (rule_id) REFERENCES alert_rules(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS api_favorites (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    interface_id TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, interface_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS api_reviews (
+    id TEXT PRIMARY KEY,
+    interface_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    user_name TEXT,
+    rating INTEGER NOT NULL,
+    comment TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS realtime_channels (
+    id TEXT PRIMARY KEY,
+    channel TEXT NOT NULL UNIQUE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS realtime_messages (
+    id TEXT PRIMARY KEY,
+    channel TEXT NOT NULL,
+    event TEXT NOT NULL,
+    data TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_gateway_routes_path ON gateway_routes(path);
+  CREATE INDEX IF NOT EXISTS idx_rate_limit_rules_path ON rate_limit_rules(path);
+  CREATE INDEX IF NOT EXISTS idx_test_results_suite ON test_results(suite_id);
+  CREATE INDEX IF NOT EXISTS idx_workflow_executions_workflow ON workflow_executions(workflow_id);
+  CREATE INDEX IF NOT EXISTS idx_i18n_translations_locale ON i18n_translations(locale);
+  CREATE INDEX IF NOT EXISTS idx_alert_rules_type ON alert_rules(type);
+  CREATE INDEX IF NOT EXISTS idx_alert_history_rule ON alert_history(rule_id);
+  CREATE INDEX IF NOT EXISTS idx_api_favorites_user ON api_favorites(user_id);
+  CREATE INDEX IF NOT EXISTS idx_api_reviews_interface ON api_reviews(interface_id);
+  CREATE INDEX IF NOT EXISTS idx_realtime_messages_channel ON realtime_messages(channel);
+`);
+
 export default db;

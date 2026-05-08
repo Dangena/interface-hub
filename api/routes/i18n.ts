@@ -1,4 +1,6 @@
 import { Router, type Request, type Response } from 'express';
+import db from '../database.js';
+import { randomUUID } from 'crypto';
 
 const router = Router();
 
@@ -244,8 +246,6 @@ const builtinLocales: Record<string, Translations> = {
   },
 };
 
-const customOverrides: Map<string, Translations> = new Map();
-
 function deepMerge(base: Translations, override: Translations): Translations {
   const result: Translations = { ...base };
   for (const key of Object.keys(override)) {
@@ -265,12 +265,64 @@ function deepMerge(base: Translations, override: Translations): Translations {
   return result;
 }
 
+function flattenTranslations(obj: Translations, prefix: string = ''): Array<{ namespace: string; key: string; value: string }> {
+  const rows: Array<{ namespace: string; key: string; value: string }> = [];
+  for (const ns of Object.keys(obj)) {
+    const nsObj = obj[ns];
+    if (typeof nsObj === 'object' && nsObj !== null && !Array.isArray(nsObj)) {
+      for (const k of Object.keys(nsObj)) {
+        const val = nsObj[k];
+        if (typeof val === 'string') {
+          rows.push({ namespace: ns, key: k, value: val });
+        } else if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
+          const nested = flattenTranslations(val as Translations, k);
+          for (const n of nested) {
+            rows.push({ namespace: ns, key: `${k}.${n.key}`, value: n.value });
+          }
+        }
+      }
+    }
+  }
+  return rows;
+}
+
+function buildTranslationsFromRows(rows: Array<{ namespace: string; key: string; value: string }>): Translations {
+  const result: Translations = {};
+  for (const row of rows) {
+    if (!result[row.namespace]) {
+      result[row.namespace] = {};
+    }
+    const parts = row.key.split('.');
+    let current: TranslationValue = result[row.namespace];
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (typeof current === 'object' && current !== null && !Array.isArray(current)) {
+        if (!(parts[i] in (current as Record<string, TranslationValue>))) {
+          (current as Record<string, TranslationValue>)[parts[i]] = {};
+        }
+        current = (current as Record<string, TranslationValue>)[parts[i]];
+      }
+    }
+    if (typeof current === 'object' && current !== null && !Array.isArray(current)) {
+      (current as Record<string, TranslationValue>)[parts[parts.length - 1]] = row.value;
+    }
+  }
+  return result;
+}
+
+function getDbOverrides(locale: string): Translations {
+  const rows = db.prepare(
+    'SELECT namespace, key, value FROM i18n_translations WHERE locale = ?'
+  ).all(locale) as Array<{ namespace: string; key: string; value: string }>;
+  return buildTranslationsFromRows(rows);
+}
+
 function getTranslations(locale: string): Translations | null {
   const builtin = builtinLocales[locale];
-  if (!builtin) return null;
-  const overrides = customOverrides.get(locale);
-  if (overrides) {
-    return deepMerge(builtin, overrides);
+  const dbOverrides = getDbOverrides(locale);
+  if (!builtin && Object.keys(dbOverrides).length === 0) return null;
+  if (!builtin) return dbOverrides;
+  if (Object.keys(dbOverrides).length > 0) {
+    return deepMerge(builtin, dbOverrides);
   }
   return { ...builtin };
 }
@@ -289,7 +341,13 @@ function collectKeys(obj: Translations, prefix: string = ''): string[] {
 }
 
 router.get('/locales', (req: Request, res: Response): void => {
-  const locales = Object.keys(builtinLocales).map((code) => ({
+  const builtinCodes = Object.keys(builtinLocales);
+  const customRows = db.prepare(
+    'SELECT DISTINCT locale FROM i18n_translations'
+  ).all() as Array<{ locale: string }>;
+  const customCodes = customRows.map((r) => r.locale).filter((c) => !builtinCodes.includes(c));
+  const allCodes = [...builtinCodes, ...customCodes];
+  const locales = allCodes.map((code) => ({
     code,
     name: getLocaleName(code),
   }));
@@ -312,16 +370,32 @@ router.post('/locales', (req: Request, res: Response): void => {
     res.status(400).json({ error: 'locale and translations are required' });
     return;
   }
-  const existing = customOverrides.get(locale) || {};
-  const merged = deepMerge(existing, translations);
-  customOverrides.set(locale, merged);
+  const rows = flattenTranslations(translations);
+  const upsert = db.prepare(`
+    INSERT INTO i18n_translations (id, locale, namespace, key, value, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+    ON CONFLICT(locale, namespace, key) DO UPDATE SET
+      value = excluded.value,
+      updated_at = datetime('now')
+  `);
+  const transaction = db.transaction(() => {
+    for (const row of rows) {
+      upsert.run(randomUUID(), locale, row.namespace, row.key, row.value);
+    }
+  });
+  transaction();
   const result = getTranslations(locale);
   res.json({ locale, translations: result });
 });
 
 router.get('/detect', (req: Request, res: Response): void => {
   const acceptLanguage = req.headers['accept-language'] || '';
-  const supportedLocales = Object.keys(builtinLocales);
+  const builtinCodes = Object.keys(builtinLocales);
+  const customRows = db.prepare(
+    'SELECT DISTINCT locale FROM i18n_translations'
+  ).all() as Array<{ locale: string }>;
+  const customCodes = customRows.map((r) => r.locale);
+  const supportedLocales = [...builtinCodes, ...customCodes];
   const parsed = parseAcceptLanguage(acceptLanguage);
   let detected = 'en-US';
   for (const { locale } of parsed) {

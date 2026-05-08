@@ -39,12 +39,36 @@ interface TestResult {
   results: TestResultItem[];
 }
 
-const suites = new Map<string, TestSuite>();
-const results = new Map<string, TestResult>();
+function rowToSuite(row: Record<string, any>): TestSuite {
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description || '',
+    interfaceIds: JSON.parse(row.interface_ids || '[]'),
+    schedule: row.schedule || '',
+    lastRunAt: row.last_run_at || null,
+    lastResult: row.last_result || null,
+    enabled: !!row.enabled,
+    createdAt: row.created_at,
+  };
+}
+
+function rowToResult(row: Record<string, any>): TestResult {
+  return {
+    id: row.id,
+    suiteId: row.suite_id || null,
+    timestamp: row.completed_at || row.created_at,
+    totalTests: row.total_tests,
+    passed: row.passed,
+    failed: row.failed,
+    results: JSON.parse(row.results || '[]'),
+  };
+}
 
 router.get('/suites', (_req, res) => {
   try {
-    const allSuites = Array.from(suites.values());
+    const rows = db.prepare('SELECT * FROM test_suites ORDER BY created_at DESC').all() as Record<string, any>[];
+    const allSuites = rows.map(rowToSuite);
     res.json(allSuites);
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch test suites' });
@@ -62,19 +86,22 @@ router.post('/suites', (req, res) => {
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    const suite: TestSuite = {
+    db.prepare(`
+      INSERT INTO test_suites (id, name, description, interface_ids, schedule, enabled, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
       id,
       name,
-      description: description || '',
-      interfaceIds: interfaceIds || [],
-      schedule: schedule || '',
-      lastRunAt: null,
-      lastResult: null,
-      enabled: enabled !== undefined ? enabled : true,
-      createdAt: now,
-    };
+      description || '',
+      JSON.stringify(interfaceIds || []),
+      schedule || '',
+      enabled !== undefined ? (enabled ? 1 : 0) : 1,
+      now,
+      now,
+    );
 
-    suites.set(id, suite);
+    const row = db.prepare('SELECT * FROM test_suites WHERE id = ?').get(id) as Record<string, any>;
+    const suite = rowToSuite(row);
     res.status(201).json(suite);
   } catch (error) {
     res.status(500).json({ error: 'Failed to create test suite' });
@@ -84,24 +111,39 @@ router.post('/suites', (req, res) => {
 router.put('/suites/:id', (req, res) => {
   try {
     const { id } = req.params;
-    const existing = suites.get(id);
+    const row = db.prepare('SELECT * FROM test_suites WHERE id = ?').get(id) as Record<string, any> | undefined;
 
-    if (!existing) {
+    if (!row) {
       return res.status(404).json({ error: 'Test suite not found' });
     }
 
+    const existing = rowToSuite(row);
     const { name, description, interfaceIds, schedule, enabled } = req.body;
 
-    const updated: TestSuite = {
-      ...existing,
-      name: name ?? existing.name,
-      description: description ?? existing.description,
-      interfaceIds: interfaceIds ?? existing.interfaceIds,
-      schedule: schedule ?? existing.schedule,
-      enabled: enabled !== undefined ? enabled : existing.enabled,
-    };
+    const updatedName = name ?? existing.name;
+    const updatedDescription = description ?? existing.description;
+    const updatedInterfaceIds = interfaceIds ?? existing.interfaceIds;
+    const updatedSchedule = schedule ?? existing.schedule;
+    const updatedEnabled = enabled !== undefined ? enabled : existing.enabled;
 
-    suites.set(id, updated);
+    const now = new Date().toISOString();
+
+    db.prepare(`
+      UPDATE test_suites
+      SET name = ?, description = ?, interface_ids = ?, schedule = ?, enabled = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      updatedName,
+      updatedDescription,
+      JSON.stringify(updatedInterfaceIds),
+      updatedSchedule,
+      updatedEnabled ? 1 : 0,
+      now,
+      id,
+    );
+
+    const updatedRow = db.prepare('SELECT * FROM test_suites WHERE id = ?').get(id) as Record<string, any>;
+    const updated = rowToSuite(updatedRow);
     res.json(updated);
   } catch (error) {
     res.status(500).json({ error: 'Failed to update test suite' });
@@ -111,21 +153,14 @@ router.put('/suites/:id', (req, res) => {
 router.delete('/suites/:id', (req, res) => {
   try {
     const { id } = req.params;
-    const existing = suites.get(id);
+    const row = db.prepare('SELECT * FROM test_suites WHERE id = ?').get(id) as Record<string, any> | undefined;
 
-    if (!existing) {
+    if (!row) {
       return res.status(404).json({ error: 'Test suite not found' });
     }
 
-    suites.delete(id);
-
-    const resultsToDelete: string[] = [];
-    results.forEach((result, resultId) => {
-      if (result.suiteId === id) {
-        resultsToDelete.push(resultId);
-      }
-    });
-    resultsToDelete.forEach(resultId => results.delete(resultId));
+    db.prepare('DELETE FROM test_results WHERE suite_id = ?').run(id);
+    db.prepare('DELETE FROM test_suites WHERE id = ?').run(id);
 
     res.json({ message: 'Test suite deleted successfully' });
   } catch (error) {
@@ -136,12 +171,13 @@ router.delete('/suites/:id', (req, res) => {
 router.post('/suites/:id/run', async (req, res) => {
   try {
     const { id } = req.params;
-    const suite = suites.get(id);
+    const row = db.prepare('SELECT * FROM test_suites WHERE id = ?').get(id) as Record<string, any> | undefined;
 
-    if (!suite) {
+    if (!row) {
       return res.status(404).json({ error: 'Test suite not found' });
     }
 
+    const suite = rowToSuite(row);
     const { baseUrl } = req.body;
     const testResults: TestResultItem[] = [];
 
@@ -221,6 +257,27 @@ router.post('/suites/:id/run', async (req, res) => {
     const resultId = uuidv4();
     const now = new Date().toISOString();
 
+    const lastResult = failedCount === 0 ? 'passed' : (passedCount === 0 ? 'failed' : 'partial');
+
+    db.prepare(`
+      INSERT INTO test_results (id, suite_id, total_tests, passed, failed, results, started_at, completed_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      resultId,
+      id,
+      totalTests,
+      passedCount,
+      failedCount,
+      JSON.stringify(testResults),
+      now,
+      now,
+      now,
+    );
+
+    db.prepare(`
+      UPDATE test_suites SET last_run_at = ?, last_result = ?, updated_at = ? WHERE id = ?
+    `).run(now, lastResult, now, id);
+
     const testResult: TestResult = {
       id: resultId,
       suiteId: id,
@@ -231,12 +288,6 @@ router.post('/suites/:id/run', async (req, res) => {
       results: testResults,
     };
 
-    results.set(resultId, testResult);
-
-    suite.lastRunAt = now;
-    suite.lastResult = failedCount === 0 ? 'passed' : (passedCount === 0 ? 'failed' : 'partial');
-    suites.set(id, suite);
-
     res.json(testResult);
   } catch (error) {
     res.status(500).json({ error: 'Failed to run test suite' });
@@ -246,16 +297,14 @@ router.post('/suites/:id/run', async (req, res) => {
 router.get('/suites/:id/results', (req, res) => {
   try {
     const { id } = req.params;
-    const suite = suites.get(id);
+    const row = db.prepare('SELECT * FROM test_suites WHERE id = ?').get(id) as Record<string, any> | undefined;
 
-    if (!suite) {
+    if (!row) {
       return res.status(404).json({ error: 'Test suite not found' });
     }
 
-    const suiteResults = Array.from(results.entries())
-      .filter(([, r]) => r.suiteId === id)
-      .map(([, r]) => r)
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    const resultRows = db.prepare('SELECT * FROM test_results WHERE suite_id = ? ORDER BY completed_at DESC').all(id) as Record<string, any>[];
+    const suiteResults = resultRows.map(rowToResult);
 
     res.json(suiteResults);
   } catch (error) {
@@ -266,12 +315,13 @@ router.get('/suites/:id/results', (req, res) => {
 router.get('/results/:id', (req, res) => {
   try {
     const { id } = req.params;
-    const result = results.get(id);
+    const row = db.prepare('SELECT * FROM test_results WHERE id = ?').get(id) as Record<string, any> | undefined;
 
-    if (!result) {
+    if (!row) {
       return res.status(404).json({ error: 'Test result not found' });
     }
 
+    const result = rowToResult(row);
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch test result' });
@@ -351,6 +401,21 @@ router.post('/quick-test', async (req, res) => {
     const resultId = uuidv4();
     const now = new Date().toISOString();
 
+    db.prepare(`
+      INSERT INTO test_results (id, suite_id, total_tests, passed, failed, results, started_at, completed_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      resultId,
+      '',
+      1,
+      passed ? 1 : 0,
+      passed ? 0 : 1,
+      JSON.stringify([resultItem]),
+      now,
+      now,
+      now,
+    );
+
     const testResult: TestResult = {
       id: resultId,
       suiteId: null,
@@ -360,8 +425,6 @@ router.post('/quick-test', async (req, res) => {
       failed: passed ? 0 : 1,
       results: [resultItem],
     };
-
-    results.set(resultId, testResult);
 
     res.json(testResult);
   } catch (error) {

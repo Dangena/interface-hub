@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
+import db from '../database';
 
 const router = Router();
 
@@ -20,15 +21,58 @@ interface Subscription {
 
 const subscriptions = new Map<string, Subscription>();
 const channelSubscriptions = new Map<string, Set<string>>();
-const messageHistory = new Map<string, WebSocketMessage[]>();
+
+const insertChannelStmt = db.prepare(
+  'INSERT OR IGNORE INTO realtime_channels (id, channel, created_at) VALUES (?, ?, ?)'
+);
+
+const insertMessageStmt = db.prepare(
+  'INSERT INTO realtime_messages (id, channel, event, data, created_at) VALUES (?, ?, ?, ?, ?)'
+);
+
+const getRecentMessagesStmt = db.prepare(
+  'SELECT id, channel, event, data, created_at FROM realtime_messages WHERE channel = ? ORDER BY created_at DESC LIMIT ?'
+);
+
+const getChannelMessagesStmt = db.prepare(
+  'SELECT id, channel, event, data, created_at FROM realtime_messages WHERE channel = ? ORDER BY created_at ASC LIMIT ?'
+);
+
+function ensureChannel(channel: string) {
+  insertChannelStmt.run(uuidv4(), channel, new Date().toISOString());
+}
+
+function persistMessage(message: WebSocketMessage) {
+  insertMessageStmt.run(
+    message.id,
+    message.channel,
+    message.event,
+    JSON.stringify(message.data),
+    message.timestamp
+  );
+}
+
+function rowToMessage(row: any): WebSocketMessage {
+  return {
+    id: row.id,
+    channel: row.channel,
+    event: row.event,
+    data: row.data ? JSON.parse(row.data) : null,
+    timestamp: row.created_at,
+  };
+}
 
 router.get('/channels', (req, res) => {
-  const channels = Array.from(channelSubscriptions.keys()).map(channel => ({
-    channel,
-    subscriberCount: channelSubscriptions.get(channel)?.size || 0,
-    recentMessages: (messageHistory.get(channel) || []).slice(-5),
+  const channels = db.prepare(
+    'SELECT channel, created_at FROM realtime_channels ORDER BY created_at ASC'
+  ).all() as any[];
+
+  const result = channels.map(ch => ({
+    channel: ch.channel,
+    subscriberCount: channelSubscriptions.get(ch.channel)?.size || 0,
   }));
-  res.json(channels);
+
+  res.json(result);
 });
 
 router.post('/subscribe', (req, res) => {
@@ -38,6 +82,8 @@ router.post('/subscribe', (req, res) => {
     res.status(400).json({ error: 'Channel is required' });
     return;
   }
+
+  ensureChannel(channel);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -61,8 +107,9 @@ router.post('/subscribe', (req, res) => {
 
   res.write(`event: connected\ndata: ${JSON.stringify({ subscriptionId: subId, channel })}\n\n`);
 
-  const recentMessages = messageHistory.get(channel) || [];
-  for (const msg of recentMessages.slice(-10)) {
+  const recentRows = getRecentMessagesStmt.all(channel, 10) as any[];
+  const recentMessages = recentRows.reverse().map(rowToMessage);
+  for (const msg of recentMessages) {
     res.write(`event: ${msg.event}\ndata: ${JSON.stringify(msg)}\n\n`);
   }
 
@@ -94,14 +141,8 @@ router.post('/publish', (req, res) => {
     timestamp: new Date().toISOString(),
   };
 
-  if (!messageHistory.has(channel)) {
-    messageHistory.set(channel, []);
-  }
-  const history = messageHistory.get(channel)!;
-  history.push(message);
-  if (history.length > 100) {
-    history.splice(0, history.length - 100);
-  }
+  ensureChannel(channel);
+  persistMessage(message);
 
   const subs = channelSubscriptions.get(channel);
   let sentCount = 0;
@@ -150,17 +191,31 @@ router.post('/unsubscribe', (req, res) => {
 router.get('/history/:channel', (req, res) => {
   const { channel } = req.params;
   const limit = parseInt(req.query.limit as string) || 50;
-  const history = messageHistory.get(channel) || [];
-  res.json(history.slice(-limit));
+  const rows = getChannelMessagesStmt.all(channel, limit) as any[];
+  const messages = rows.map(rowToMessage);
+  res.json(messages);
 });
 
 router.get('/status', (req, res) => {
+  const dbChannels = db.prepare(
+    'SELECT channel FROM realtime_channels ORDER BY created_at ASC'
+  ).all() as any[];
+
+  const channelDetails: Record<string, number> = {};
+  for (const ch of dbChannels) {
+    channelDetails[ch.channel] = channelSubscriptions.get(ch.channel)?.size || 0;
+  }
+
+  for (const ch of channelSubscriptions.keys()) {
+    if (!(ch in channelDetails)) {
+      channelDetails[ch] = channelSubscriptions.get(ch)!.size;
+    }
+  }
+
   res.json({
     totalSubscriptions: subscriptions.size,
-    channels: channelSubscriptions.size,
-    channelDetails: Object.fromEntries(
-      Array.from(channelSubscriptions.entries()).map(([ch, subs]) => [ch, subs.size])
-    ),
+    channels: dbChannels.length,
+    channelDetails,
   });
 });
 
@@ -173,14 +228,8 @@ export function broadcastToChannel(channel: string, event: string, data: any): n
     timestamp: new Date().toISOString(),
   };
 
-  if (!messageHistory.has(channel)) {
-    messageHistory.set(channel, []);
-  }
-  const history = messageHistory.get(channel)!;
-  history.push(message);
-  if (history.length > 100) {
-    history.splice(0, history.length - 100);
-  }
+  ensureChannel(channel);
+  persistMessage(message);
 
   let sentCount = 0;
   const subs = channelSubscriptions.get(channel);
