@@ -22,6 +22,21 @@ import Approvals from './pages/Approvals';
 import Tracing from './pages/Tracing';
 import CiCd from './pages/CiCd';
 import DataSimulator from './pages/DataSimulator';
+import ProjectParser from './pages/ProjectParser';
+import DataSourceManager from './pages/DataSourceManager';
+import Marketplace from './pages/Marketplace';
+import Gateway from './pages/Gateway';
+import Environments from './pages/Environments';
+import RateLimit from './pages/RateLimit';
+import GrpcManager from './pages/GrpcManager';
+import SdkGenerator from './pages/SdkGenerator';
+import DiffViewer from './pages/DiffViewer';
+import TestSuite from './pages/TestSuite';
+import Monitoring from './pages/Monitoring';
+import WorkflowEditor from './pages/WorkflowEditor';
+import AiAssistant from './pages/AiAssistant';
+import I18nManager from './pages/I18nManager';
+import TeableManager from './pages/TeableManager';
 import { useAppStore } from './stores/appStore';
 import { ToastContainer } from './components/Toast';
 
@@ -232,6 +247,35 @@ function App() {
               </PrivateRoute>
             }
           />
+          <Route
+            path="/project-parser"
+            element={
+              <PrivateRoute>
+                <AppLayout><ProjectParser /></AppLayout>
+              </PrivateRoute>
+            }
+          />
+          <Route
+            path="/data-source"
+            element={
+              <PrivateRoute>
+                <AppLayout><DataSourceManager /></AppLayout>
+              </PrivateRoute>
+            }
+          />
+          <Route path="/marketplace" element={<PrivateRoute><AppLayout><Marketplace /></AppLayout></PrivateRoute>} />
+          <Route path="/gateway" element={<PrivateRoute><AppLayout><Gateway /></AppLayout></PrivateRoute>} />
+          <Route path="/environments" element={<PrivateRoute><AppLayout><Environments /></AppLayout></PrivateRoute>} />
+          <Route path="/rate-limit" element={<PrivateRoute><AppLayout><RateLimit /></AppLayout></PrivateRoute>} />
+          <Route path="/grpc" element={<PrivateRoute><AppLayout><GrpcManager /></AppLayout></PrivateRoute>} />
+          <Route path="/sdk-generator" element={<PrivateRoute><AppLayout><SdkGenerator /></AppLayout></PrivateRoute>} />
+          <Route path="/diff" element={<PrivateRoute><AppLayout><DiffViewer /></AppLayout></PrivateRoute>} />
+          <Route path="/test-suite" element={<PrivateRoute><AppLayout><TestSuite /></AppLayout></PrivateRoute>} />
+          <Route path="/monitoring" element={<PrivateRoute><AppLayout><Monitoring /></AppLayout></PrivateRoute>} />
+          <Route path="/workflow" element={<PrivateRoute><AppLayout><WorkflowEditor /></AppLayout></PrivateRoute>} />
+          <Route path="/ai" element={<PrivateRoute><AppLayout><AiAssistant /></AppLayout></PrivateRoute>} />
+          <Route path="/i18n" element={<PrivateRoute><AppLayout><I18nManager /></AppLayout></PrivateRoute>} />
+          <Route path="/teable" element={<PrivateRoute><AppLayout><TeableManager /></AppLayout></PrivateRoute>} />
         </Routes>
       </div>
     </Router>
