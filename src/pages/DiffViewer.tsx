@@ -58,12 +58,14 @@ export default function DiffViewer() {
 
   const loadData = async () => {
     try {
-      const [interfacesData, versionsData] = await Promise.all([
-        api.get('/interfaces').catch(() => []),
-        api.get('/interfaces/versions').catch(() => []),
+      const [interfacesResult, versionsResult] = await Promise.all([
+        api.get('/interfaces').catch(() => ({ data: [] })),
+        api.get('/interfaces/versions').catch(() => ({ data: [] })),
       ]);
-      setInterfaces(interfacesData);
-      setVersions(versionsData);
+      const interfacesData: InterfaceOption[] = interfacesResult.data || interfacesResult;
+      const versionsData: VersionOption[] = versionsResult.data || versionsResult;
+      setInterfaces(Array.isArray(interfacesData) ? interfacesData : []);
+      setVersions(Array.isArray(versionsData) ? versionsData : []);
     } catch (error: any) {
       toast('error', error.message || '加载数据失败');
     } finally {

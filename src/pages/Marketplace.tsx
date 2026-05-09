@@ -43,8 +43,9 @@ export default function Marketplace() {
 
   const loadApis = async () => {
     try {
-      const data: MarketplaceApi[] = await api.get('/marketplace/apis');
-      setApis(data);
+      const result = await api.get('/marketplace/apis');
+      const data: MarketplaceApi[] = result.data || result;
+      setApis(Array.isArray(data) ? data : []);
       const cats = [...new Set(data.map((a) => a.category).filter(Boolean))];
       setCategories(cats);
     } catch (error: any) {

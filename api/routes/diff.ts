@@ -65,20 +65,50 @@ function normalizeInterface(raw: Record<string, any>): Record<string, any> {
   return normalized;
 }
 
-router.post('/compare', (req, res) => {
+router.post('/compare', async (req, res) => {
   try {
-    const { before, after } = req.body;
+    const { before, after, sourceId, targetId } = req.body;
 
-    if (!before || !after) {
-      return res.status(400).json({ error: 'Both "before" and "after" interface objects are required' });
+    let beforeData = before;
+    let afterData = after;
+
+    if (!beforeData && sourceId) {
+      const row = (await query('SELECT * FROM interfaces WHERE id = $1', [sourceId])).rows[0];
+      if (!row) return res.status(404).json({ error: 'Source interface not found' });
+      beforeData = row;
+    }
+    if (!afterData && targetId) {
+      const row = (await query('SELECT * FROM interfaces WHERE id = $1', [targetId])).rows[0];
+      if (!row) return res.status(404).json({ error: 'Target interface not found' });
+      afterData = row;
     }
 
-    const normalizedBefore = normalizeInterface(before);
-    const normalizedAfter = normalizeInterface(after);
+    if (!beforeData || !afterData) {
+      return res.status(400).json({ error: 'Provide either before/after objects or sourceId/targetId' });
+    }
+
+    const normalizedBefore = normalizeInterface(beforeData);
+    const normalizedAfter = normalizeInterface(afterData);
 
     const result = compareInterfaces(normalizedBefore, normalizedAfter);
 
-    res.json(result);
+    const diffs: Array<{ type: 'added' | 'removed' | 'changed'; field: string; oldValue?: string; newValue?: string }> = [];
+    for (const field of result.added) {
+      diffs.push({ type: 'added', field, newValue: String(normalizedAfter[field] ?? '') });
+    }
+    for (const field of result.removed) {
+      diffs.push({ type: 'removed', field, oldValue: String(normalizedBefore[field] ?? '') });
+    }
+    for (const item of result.changed) {
+      diffs.push({ type: 'changed', field: item.field, oldValue: String(item.before ?? ''), newValue: String(item.after ?? '') });
+    }
+
+    res.json({
+      source: normalizedBefore.name || sourceId,
+      target: normalizedAfter.name || targetId,
+      diffs,
+      summary: { added: result.added.length, removed: result.removed.length, changed: result.changed.length },
+    });
   } catch (error) {
     res.status(500).json({ error: 'Failed to compare interfaces' });
   }

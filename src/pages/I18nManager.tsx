@@ -37,8 +37,9 @@ export default function I18nManager() {
 
   const loadLocales = async () => {
     try {
-      const data = await api.get('/i18n/locales');
-      setLocales(data);
+      const result = await api.get('/i18n/locales');
+      const data = result.locales || result.data || result;
+      setLocales(Array.isArray(data) ? data : []);
     } catch (error: any) {
       toast('error', error.message || '加载语言数据失败');
     } finally {

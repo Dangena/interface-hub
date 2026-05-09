@@ -1,18 +1,27 @@
 import { useEffect, useState } from 'react';
-import { Activity, Heart, AlertTriangle, Bell, BarChart3, Zap, Clock, CheckCircle, XCircle } from 'lucide-react';
+import { Activity, Heart, AlertTriangle, Bell, BarChart3, Zap, Clock, CheckCircle, XCircle, Database, Cpu } from 'lucide-react';
 import api from '../services/api';
 import { toast } from '../components/Toast';
+
+interface HealthCheck {
+  name: string;
+  status: 'up' | 'down';
+  latency: number;
+}
 
 interface HealthStatus {
   status: 'healthy' | 'degraded' | 'down';
   uptime: number;
-  version: string;
-  checks: { name: string; status: 'up' | 'down'; latency: number }[];
+  uptimeFormatted?: string;
+  version?: string;
+  checks: HealthCheck[];
+  database?: { status: string; responseTime: number };
+  memory?: { rss: string; heapTotal: string; heapUsed: string; external: string; heapUsagePercent: number };
 }
 
 interface MetricCard {
   label: string;
-  value: number;
+  value: number | string;
   unit: string;
   change?: number;
 }
@@ -40,6 +49,8 @@ interface DashboardData {
   metrics: MetricCard[];
   alertRules: AlertRule[];
   recentAlerts: RecentAlert[];
+  alertRulesCount?: number;
+  enabledAlertRulesCount?: number;
 }
 
 const healthConfig: Record<string, { label: string; color: string; icon: typeof Heart }> = {
@@ -65,7 +76,36 @@ export default function Monitoring() {
   const loadDashboard = async () => {
     try {
       const result = await api.get('/monitoring/dashboard');
-      setData(result);
+      const rawHealth = result.health || {};
+      const rawMetrics = result.metrics || {};
+
+      const checks: HealthCheck[] = [];
+      if (rawHealth.database) {
+        checks.push({ name: '数据库', status: rawHealth.database.status === 'ok' ? 'up' : 'down', latency: rawHealth.database.responseTime || 0 });
+      }
+      if (rawHealth.memory) {
+        checks.push({ name: '内存', status: rawHealth.memory.heapUsagePercent < 90 ? 'up' : 'down', latency: 0 });
+      }
+
+      const health: HealthStatus = {
+        ...rawHealth,
+        checks,
+        version: rawHealth.version || '1.0.0',
+      };
+
+      const metrics: MetricCard[] = Array.isArray(rawMetrics)
+        ? rawMetrics
+        : [
+            { label: '总请求数', value: rawMetrics.totalRequests || 0, unit: '次' },
+            { label: '平均响应时间', value: rawMetrics.avgResponseTime || 0, unit: 'ms' },
+            { label: '错误率', value: rawMetrics.errorRate || 0, unit: '%' },
+            { label: '错误数', value: rawMetrics.errorCount || 0, unit: '个' },
+          ];
+
+      const alertRules: AlertRule[] = (result as any).alertRules || [];
+      const recentAlerts: RecentAlert[] = Array.isArray(result.recentAlerts) ? result.recentAlerts : [];
+
+      setData({ health, metrics, alertRules, recentAlerts, alertRulesCount: result.alertRulesCount, enabledAlertRulesCount: result.enabledAlertRulesCount });
     } catch (error: any) {
       toast('error', error.message || '加载监控数据失败');
     } finally {
@@ -100,7 +140,7 @@ export default function Monitoring() {
 
       {health && (
         <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6 mb-6">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between flex-wrap gap-4">
             <div className="flex items-center gap-4">
               {(() => {
                 const config = healthConfig[health.status] || healthConfig.healthy;
@@ -116,12 +156,13 @@ export default function Monitoring() {
                   系统状态: {healthConfig[health.status]?.label || health.status}
                 </h2>
                 <p className="text-sm text-gray-500 dark:text-gray-400">
-                  运行时间: {Math.floor(health.uptime / 3600)}h {Math.floor((health.uptime % 3600) / 60)}m · 版本: {health.version}
+                  运行时间: {health.uptimeFormatted || `${Math.floor(health.uptime / 3600)}h ${Math.floor((health.uptime % 3600) / 60)}m`}
+                  {health.version && ` · 版本: ${health.version}`}
                 </p>
               </div>
             </div>
             <div className="flex items-center gap-3">
-              {health.checks.map((check) => (
+              {health.checks && health.checks.map((check) => (
                 <div key={check.name} className="flex items-center gap-1 text-sm">
                   {check.status === 'up' ? (
                     <CheckCircle className="w-4 h-4 text-green-600" />
@@ -129,9 +170,21 @@ export default function Monitoring() {
                     <XCircle className="w-4 h-4 text-red-600" />
                   )}
                   <span className="text-gray-600 dark:text-gray-400">{check.name}</span>
-                  <span className="text-xs text-gray-400">{check.latency}ms</span>
+                  {check.latency > 0 && <span className="text-xs text-gray-400">{check.latency}ms</span>}
                 </div>
               ))}
+              {health.database && (
+                <div className="flex items-center gap-1 text-sm">
+                  <Database className="w-4 h-4 text-green-600" />
+                  <span className="text-gray-600 dark:text-gray-400">数据库</span>
+                </div>
+              )}
+              {health.memory && (
+                <div className="flex items-center gap-1 text-sm">
+                  <Cpu className="w-4 h-4 text-blue-600" />
+                  <span className="text-gray-600 dark:text-gray-400">内存 {health.memory.heapUsagePercent}%</span>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -166,6 +219,9 @@ export default function Monitoring() {
           <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
             <Bell className="w-5 h-5" />
             告警规则
+            {data?.alertRulesCount !== undefined && (
+              <span className="text-sm font-normal text-gray-400">({data.alertRulesCount} 条)</span>
+            )}
           </h2>
           {alertRules.length > 0 ? (
             <div className="space-y-3">

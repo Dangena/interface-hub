@@ -60,8 +60,9 @@ export default function WorkflowEditor() {
 
   const loadWorkflows = async () => {
     try {
-      const data = await api.get('/workflow/workflows');
-      setWorkflows(data);
+      const result = await api.get('/workflow/workflows');
+      const data = result.data || result;
+      setWorkflows(Array.isArray(data) ? data : []);
     } catch (error: any) {
       toast('error', error.message || '加载工作流失败');
     } finally {

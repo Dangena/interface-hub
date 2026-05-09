@@ -409,7 +409,7 @@ async function initDatabase() {
       name TEXT NOT NULL,
       type TEXT NOT NULL,
       threshold DOUBLE PRECISION NOT NULL,
-      window INTEGER DEFAULT 5,
+      "window" INTEGER DEFAULT 5,
       enabled INTEGER DEFAULT 1,
       last_triggered TIMESTAMP,
       created_at TIMESTAMP DEFAULT NOW(),

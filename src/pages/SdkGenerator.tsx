@@ -32,12 +32,14 @@ export default function SdkGenerator() {
 
   const loadData = async () => {
     try {
-      const [templatesData, interfacesData] = await Promise.all([
+      const [templatesResult, interfacesResult] = await Promise.all([
         api.get('/sdk-generator/templates'),
-        api.get('/interfaces').catch(() => []),
+        api.get('/interfaces').catch(() => ({ data: [] })),
       ]);
-      setTemplates(templatesData);
-      setInterfaces(interfacesData);
+      const templatesData: Template[] = templatesResult.templates || templatesResult.data || templatesResult;
+      const interfacesData: InterfaceItem[] = interfacesResult.data || interfacesResult;
+      setTemplates(Array.isArray(templatesData) ? templatesData : []);
+      setInterfaces(Array.isArray(interfacesData) ? interfacesData : []);
     } catch (error: any) {
       toast('error', error.message || '加载数据失败');
     } finally {
@@ -58,7 +60,7 @@ export default function SdkGenerator() {
     setGeneratedCode('');
     try {
       const data = await api.post('/sdk-generator/generate-from-db', {
-        templateId: selectedTemplate,
+        template: selectedTemplate,
         interfaceIds: selectedInterfaces,
       });
       setGeneratedCode(data.code || data.content || JSON.stringify(data, null, 2));
