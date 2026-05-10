@@ -199,7 +199,7 @@ router.post('/alerts', async (req, res) => {
     const windowVal = Number(window) || 5;
 
     await query(`
-      INSERT INTO alert_rules (id, name, type, threshold, window, enabled, created_at, updated_at)
+      INSERT INTO alert_rules (id, name, type, threshold, "window", enabled, created_at, updated_at)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
     `, [id, name, type, Number(threshold), windowVal, enabledVal, now, now]);
 
@@ -234,7 +234,7 @@ router.put('/alerts/:id', async (req, res) => {
 
     await query(`
       UPDATE alert_rules
-      SET name = $1, type = $2, threshold = $3, window = $4, enabled = $5, updated_at = $6
+      SET name = $1, type = $2, threshold = $3, "window" = $4, enabled = $5, updated_at = $6
       WHERE id = $7
     `, [newName, newType, newThreshold, newWindow, newEnabled, now, id]);
 

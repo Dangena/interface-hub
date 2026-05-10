@@ -401,21 +401,6 @@ router.post('/quick-test', async (req, res) => {
     const resultId = uuidv4();
     const now = new Date().toISOString();
 
-    await query(`
-      INSERT INTO test_results (id, suite_id, total_tests, passed, failed, results, started_at, completed_at, created_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-    `, [
-      resultId,
-      '',
-      1,
-      passed ? 1 : 0,
-      passed ? 0 : 1,
-      JSON.stringify([resultItem]),
-      now,
-      now,
-      now,
-    ]);
-
     const testResult: TestResult = {
       id: resultId,
       suiteId: null,
