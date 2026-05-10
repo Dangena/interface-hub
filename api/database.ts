@@ -1,19 +1,82 @@
-import { Pool } from 'pg';
+import Database from 'better-sqlite3';
+import path from 'path';
+import fs from 'fs';
 
-const pool = new Pool({
-  host: process.env.PGHOST || 'localhost',
-  port: parseInt(process.env.PGPORT || '5432', 10),
-  database: process.env.PGDATABASE || 'interfacehub',
-  user: process.env.PGUSER || 'interfacehub',
-  password: process.env.PGPASSWORD || 'interfacehub123',
-});
-
-export async function query(text: string, params?: any[]) {
-  return pool.query(text, params);
+const dataDir = path.resolve(process.cwd(), 'data');
+if (!fs.existsSync(dataDir)) {
+  fs.mkdirSync(dataDir, { recursive: true });
 }
 
-async function initDatabase() {
-  await query(`
+const dbPath = path.join(dataDir, 'interface-hub.db');
+const sqliteDb = new Database(dbPath);
+
+sqliteDb.pragma('journal_mode = WAL');
+sqliteDb.pragma('foreign_keys = ON');
+
+function convertPlaceholders(sql: string): string {
+  let index = 0;
+  return sql.replace(/\$(\d+)/g, () => {
+    index++;
+    return '?';
+  });
+}
+
+function convertSQLSyntax(sql: string): string {
+  let result = sql;
+
+  result = result.replace(/DEFAULT\s+NOW\(\)/gi, "DEFAULT (datetime('now'))");
+
+  result = result.replace(/NOW\(\)/gi, "datetime('now')");
+
+  result = result.replace(/INTERVAL\s+'(\d+)\s+(second|minute|hour|day|week|month|year)s?'/gi, (_, num, unit) => {
+    const unitMap: Record<string, string> = {
+      second: 'seconds', minute: 'minutes', hour: 'hours',
+      day: 'days', week: 'days', month: 'months', year: 'years'
+    };
+    const multiplier: Record<string, number> = { week: 7 };
+    const val = multiplier[unit] ? parseInt(num) * multiplier[unit] : parseInt(num);
+    return `'${val} ${unitMap[unit] || unit}'`;
+  });
+
+  result = result.replace(/datetime\('now'\)\s*-\s*'(\d+)\s+(seconds?|minutes?|hours?|days?|months?|years?)'/g, "datetime('now', '-$1 $2')");
+
+  result = result.replace(/DOUBLE\s+PRECISION/gi, 'REAL');
+  result = result.replace(/"window"/g, '[window]');
+
+  return result;
+}
+
+export async function query(text: string, params?: any[]) {
+  const convertedSQL = convertSQLSyntax(convertPlaceholders(text));
+
+  const trimmed = convertedSQL.trim().toUpperCase();
+
+  if (trimmed.startsWith('SELECT') || trimmed.startsWith('PRAGMA') || trimmed.startsWith('WITH')) {
+    const rows = sqliteDb.prepare(convertedSQL).all(...(params || []));
+    return { rows, rowCount: rows.length, command: trimmed.split(' ')[0] };
+  }
+
+  if (trimmed.startsWith('INSERT')) {
+    const info = sqliteDb.prepare(convertedSQL).run(...(params || []));
+    return { rows: [], rowCount: info.changes, command: 'INSERT', insertId: info.lastInsertRowid };
+  }
+
+  if (trimmed.startsWith('UPDATE') || trimmed.startsWith('DELETE')) {
+    const info = sqliteDb.prepare(convertedSQL).run(...(params || []));
+    return { rows: [], rowCount: info.changes, command: trimmed.split(' ')[0] };
+  }
+
+  if (trimmed.startsWith('CREATE') || trimmed.startsWith('ALTER') || trimmed.startsWith('DROP')) {
+    const info = sqliteDb.prepare(convertedSQL).run(...(params || []));
+    return { rows: [], rowCount: info.changes, command: trimmed.split(' ')[0] };
+  }
+
+  const info = sqliteDb.prepare(convertedSQL).run(...(params || []));
+  return { rows: [], rowCount: info.changes, command: trimmed.split(' ')[0] };
+}
+
+function initDatabase() {
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS interfaces (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -27,12 +90,12 @@ async function initDatabase() {
       request_schema TEXT,
       response_schema TEXT,
       created_by TEXT,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
+      created_at DATETIME DEFAULT (datetime('now')),
+      updated_at DATETIME DEFAULT (datetime('now'))
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS parameters (
       id TEXT PRIMARY KEY,
       interface_id TEXT NOT NULL,
@@ -46,18 +109,18 @@ async function initDatabase() {
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS data_models (
       name TEXT PRIMARY KEY,
       table_name TEXT NOT NULL,
       description TEXT,
       schema TEXT,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
+      created_at DATETIME DEFAULT (datetime('now')),
+      updated_at DATETIME DEFAULT (datetime('now'))
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS fields (
       id TEXT PRIMARY KEY,
       model_name TEXT NOT NULL,
@@ -72,20 +135,20 @@ async function initDatabase() {
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS field_mappings (
       id TEXT PRIMARY KEY,
       interface_id TEXT NOT NULL,
       interface_field TEXT NOT NULL,
       model_name TEXT NOT NULL,
       model_field TEXT NOT NULL,
-      created_at TIMESTAMP DEFAULT NOW(),
+      created_at DATETIME DEFAULT (datetime('now')),
       FOREIGN KEY (interface_id) REFERENCES interfaces(id) ON DELETE CASCADE,
       FOREIGN KEY (model_name) REFERENCES data_models(name) ON DELETE CASCADE
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS api_logs (
       id TEXT PRIMARY KEY,
       interface_id TEXT,
@@ -97,11 +160,11 @@ async function initDatabase() {
       response_time INTEGER,
       ip_address TEXT,
       user_agent TEXT,
-      created_at TIMESTAMP DEFAULT NOW()
+      created_at DATETIME DEFAULT (datetime('now'))
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       email TEXT UNIQUE NOT NULL,
@@ -109,12 +172,12 @@ async function initDatabase() {
       password_hash TEXT,
       role TEXT DEFAULT 'developer',
       avatar TEXT,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
+      created_at DATETIME DEFAULT (datetime('now')),
+      updated_at DATETIME DEFAULT (datetime('now'))
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS mock_configs (
       id TEXT PRIMARY KEY,
       interface_id TEXT,
@@ -124,13 +187,13 @@ async function initDatabase() {
       delay INTEGER DEFAULT 0,
       response_config TEXT,
       enabled INTEGER DEFAULT 1,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW(),
+      created_at DATETIME DEFAULT (datetime('now')),
+      updated_at DATETIME DEFAULT (datetime('now')),
       FOREIGN KEY (interface_id) REFERENCES interfaces(id) ON DELETE CASCADE
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS database_connections (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -141,11 +204,11 @@ async function initDatabase() {
       username TEXT,
       password TEXT,
       path TEXT,
-      created_at TIMESTAMP DEFAULT NOW()
+      created_at DATETIME DEFAULT (datetime('now'))
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS change_history (
       id TEXT PRIMARY KEY,
       interface_id TEXT NOT NULL,
@@ -154,12 +217,12 @@ async function initDatabase() {
       old_value TEXT,
       new_value TEXT,
       operator TEXT,
-      created_at TIMESTAMP DEFAULT NOW(),
+      created_at DATETIME DEFAULT (datetime('now')),
       FOREIGN KEY (interface_id) REFERENCES interfaces(id) ON DELETE CASCADE
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS interface_versions (
       id TEXT PRIMARY KEY,
       interface_id TEXT NOT NULL,
@@ -167,23 +230,28 @@ async function initDatabase() {
       snapshot TEXT NOT NULL,
       description TEXT,
       operator TEXT,
-      created_at TIMESTAMP DEFAULT NOW(),
+      created_at DATETIME DEFAULT (datetime('now')),
       FOREIGN KEY (interface_id) REFERENCES interfaces(id) ON DELETE CASCADE
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS projects (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       description TEXT,
       color TEXT DEFAULT '#3B82F6',
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
+      code_files TEXT,
+      parsed_result TEXT,
+      created_at DATETIME DEFAULT (datetime('now')),
+      updated_at DATETIME DEFAULT (datetime('now'))
     )
   `);
 
-  await query(`
+  try { sqliteDb.exec(`ALTER TABLE projects ADD COLUMN code_files TEXT`); } catch {}
+  try { sqliteDb.exec(`ALTER TABLE projects ADD COLUMN parsed_result TEXT`); } catch {}
+
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS approvals (
       id TEXT PRIMARY KEY,
       type TEXT NOT NULL,
@@ -196,12 +264,12 @@ async function initDatabase() {
       reviewer_id TEXT,
       reviewer_name TEXT,
       review_comment TEXT,
-      created_at TIMESTAMP DEFAULT NOW(),
-      reviewed_at TIMESTAMP
+      created_at DATETIME DEFAULT (datetime('now')),
+      reviewed_at DATETIME
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS webhooks (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -209,25 +277,25 @@ async function initDatabase() {
       events TEXT NOT NULL,
       secret TEXT,
       enabled INTEGER DEFAULT 1,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
+      created_at DATETIME DEFAULT (datetime('now')),
+      updated_at DATETIME DEFAULT (datetime('now'))
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS ci_cd_configs (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       type TEXT NOT NULL,
       config TEXT NOT NULL,
       enabled INTEGER DEFAULT 1,
-      last_run_at TIMESTAMP,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
+      last_run_at DATETIME,
+      created_at DATETIME DEFAULT (datetime('now')),
+      updated_at DATETIME DEFAULT (datetime('now'))
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS pipeline_runs (
       id TEXT PRIMARY KEY,
       config_id TEXT NOT NULL,
@@ -235,14 +303,14 @@ async function initDatabase() {
       trigger_type TEXT NOT NULL,
       trigger_data TEXT,
       result TEXT,
-      started_at TIMESTAMP,
-      finished_at TIMESTAMP,
-      created_at TIMESTAMP DEFAULT NOW(),
+      started_at DATETIME,
+      finished_at DATETIME,
+      created_at DATETIME DEFAULT (datetime('now')),
       FOREIGN KEY (config_id) REFERENCES ci_cd_configs(id) ON DELETE CASCADE
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS notifications (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -251,11 +319,11 @@ async function initDatabase() {
       message TEXT,
       read INTEGER DEFAULT 0,
       reference_id TEXT,
-      created_at TIMESTAMP DEFAULT NOW()
+      created_at DATETIME DEFAULT (datetime('now'))
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS traces (
       id TEXT PRIMARY KEY,
       trace_id TEXT NOT NULL,
@@ -271,11 +339,11 @@ async function initDatabase() {
       logs TEXT,
       user_id TEXT,
       ip_address TEXT,
-      created_at TIMESTAMP DEFAULT NOW()
+      created_at DATETIME DEFAULT (datetime('now'))
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS gateway_routes (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -285,12 +353,12 @@ async function initDatabase() {
       enabled INTEGER DEFAULT 1,
       rate_limit INTEGER,
       strip_prefix INTEGER DEFAULT 0,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
+      created_at DATETIME DEFAULT (datetime('now')),
+      updated_at DATETIME DEFAULT (datetime('now'))
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS gateway_stats (
       id TEXT PRIMARY KEY,
       route_id TEXT NOT NULL,
@@ -298,12 +366,12 @@ async function initDatabase() {
       success_count INTEGER DEFAULT 0,
       error_count INTEGER DEFAULT 0,
       total_response_time INTEGER DEFAULT 0,
-      last_request_at TIMESTAMP,
+      last_request_at DATETIME,
       FOREIGN KEY (route_id) REFERENCES gateway_routes(id) ON DELETE CASCADE
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS rate_limit_rules (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -314,19 +382,19 @@ async function initDatabase() {
       strategy TEXT NOT NULL DEFAULT 'fixed-window',
       enabled INTEGER DEFAULT 1,
       blocked_count INTEGER DEFAULT 0,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
+      created_at DATETIME DEFAULT (datetime('now')),
+      updated_at DATETIME DEFAULT (datetime('now'))
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS rate_limit_counts (
       id TEXT PRIMARY KEY,
       rule_id TEXT NOT NULL,
       identifier TEXT NOT NULL,
       count INTEGER DEFAULT 0,
       window_start INTEGER NOT NULL,
-      tokens DOUBLE PRECISION,
+      tokens REAL,
       last_refill INTEGER,
       prev_count INTEGER DEFAULT 0,
       prev_window_start INTEGER DEFAULT 0,
@@ -334,7 +402,7 @@ async function initDatabase() {
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS test_suites (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -342,14 +410,14 @@ async function initDatabase() {
       interface_ids TEXT NOT NULL,
       schedule TEXT,
       enabled INTEGER DEFAULT 1,
-      last_run_at TIMESTAMP,
+      last_run_at DATETIME,
       last_result TEXT,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
+      created_at DATETIME DEFAULT (datetime('now')),
+      updated_at DATETIME DEFAULT (datetime('now'))
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS test_results (
       id TEXT PRIMARY KEY,
       suite_id TEXT NOT NULL,
@@ -357,89 +425,89 @@ async function initDatabase() {
       passed INTEGER DEFAULT 0,
       failed INTEGER DEFAULT 0,
       results TEXT NOT NULL,
-      started_at TIMESTAMP,
-      completed_at TIMESTAMP,
-      created_at TIMESTAMP DEFAULT NOW(),
+      started_at DATETIME,
+      completed_at DATETIME,
+      created_at DATETIME DEFAULT (datetime('now')),
       FOREIGN KEY (suite_id) REFERENCES test_suites(id) ON DELETE CASCADE
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS workflows (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       description TEXT,
       steps TEXT NOT NULL,
       status TEXT DEFAULT 'draft',
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
+      created_at DATETIME DEFAULT (datetime('now')),
+      updated_at DATETIME DEFAULT (datetime('now'))
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS workflow_executions (
       id TEXT PRIMARY KEY,
       workflow_id TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending',
       step_results TEXT,
       error TEXT,
-      started_at TIMESTAMP,
-      completed_at TIMESTAMP,
-      created_at TIMESTAMP DEFAULT NOW(),
+      started_at DATETIME,
+      completed_at DATETIME,
+      created_at DATETIME DEFAULT (datetime('now')),
       FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS i18n_translations (
       id TEXT PRIMARY KEY,
       locale TEXT NOT NULL,
       namespace TEXT NOT NULL,
       key TEXT NOT NULL,
       value TEXT NOT NULL,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW(),
+      created_at DATETIME DEFAULT (datetime('now')),
+      updated_at DATETIME DEFAULT (datetime('now')),
       UNIQUE(locale, namespace, key)
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS alert_rules (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       type TEXT NOT NULL,
-      threshold DOUBLE PRECISION NOT NULL,
-      "window" INTEGER DEFAULT 5,
+      threshold REAL NOT NULL,
+      [window] INTEGER DEFAULT 5,
       enabled INTEGER DEFAULT 1,
-      last_triggered TIMESTAMP,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
+      last_triggered DATETIME,
+      created_at DATETIME DEFAULT (datetime('now')),
+      updated_at DATETIME DEFAULT (datetime('now'))
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS alert_history (
       id TEXT PRIMARY KEY,
       rule_id TEXT NOT NULL,
-      triggered_at TIMESTAMP DEFAULT NOW(),
-      metric_value DOUBLE PRECISION,
-      threshold DOUBLE PRECISION,
+      triggered_at DATETIME DEFAULT (datetime('now')),
+      metric_value REAL,
+      threshold REAL,
       message TEXT,
       FOREIGN KEY (rule_id) REFERENCES alert_rules(id) ON DELETE CASCADE
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS api_favorites (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
       interface_id TEXT NOT NULL,
-      created_at TIMESTAMP DEFAULT NOW(),
+      created_at DATETIME DEFAULT (datetime('now')),
       UNIQUE(user_id, interface_id)
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS api_reviews (
       id TEXT PRIMARY KEY,
       interface_id TEXT NOT NULL,
@@ -447,72 +515,125 @@ async function initDatabase() {
       user_name TEXT,
       rating INTEGER NOT NULL,
       comment TEXT,
-      created_at TIMESTAMP DEFAULT NOW()
+      created_at DATETIME DEFAULT (datetime('now'))
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS realtime_channels (
       id TEXT PRIMARY KEY,
       channel TEXT NOT NULL UNIQUE,
-      created_at TIMESTAMP DEFAULT NOW()
+      created_at DATETIME DEFAULT (datetime('now'))
     )
   `);
 
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS realtime_messages (
       id TEXT PRIMARY KEY,
       channel TEXT NOT NULL,
       event TEXT NOT NULL,
       data TEXT,
-      created_at TIMESTAMP DEFAULT NOW()
+      created_at DATETIME DEFAULT (datetime('now'))
     )
   `);
 
-  await query(`CREATE INDEX IF NOT EXISTS idx_interfaces_status ON interfaces(status)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_interfaces_category ON interfaces(category)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_parameters_interface ON parameters(interface_id)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_fields_model ON fields(model_name)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_mappings_interface ON field_mappings(interface_id)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_logs_interface ON api_logs(interface_id)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_logs_created ON api_logs(created_at)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_mock_path ON mock_configs(path, method)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_change_history_interface ON change_history(interface_id)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_change_history_created ON change_history(created_at)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_interface_versions_interface ON interface_versions(interface_id)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_interface_versions_created ON interface_versions(created_at)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_approvals_requester ON approvals(requester_id)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_pipeline_runs_config ON pipeline_runs(config_id)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_pipeline_runs_status ON pipeline_runs(status)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(user_id, read)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_traces_trace_id ON traces(trace_id)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_traces_created ON traces(created_at)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_traces_operation ON traces(operation_name)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_gateway_routes_path ON gateway_routes(path)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_rate_limit_rules_path ON rate_limit_rules(path)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_test_results_suite ON test_results(suite_id)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_workflow_executions_workflow ON workflow_executions(workflow_id)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_i18n_translations_locale ON i18n_translations(locale)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_alert_rules_type ON alert_rules(type)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_alert_history_rule ON alert_history(rule_id)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_api_favorites_user ON api_favorites(user_id)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_api_reviews_interface ON api_reviews(interface_id)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_realtime_messages_channel ON realtime_messages(channel)`);
-
-  await query(`
+  sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS generated_sdks (
       id TEXT PRIMARY KEY,
       template TEXT NOT NULL,
       class_name TEXT NOT NULL,
       code TEXT NOT NULL,
       interface_count INTEGER DEFAULT 0,
-      created_at TIMESTAMP DEFAULT NOW()
+      created_at DATETIME DEFAULT (datetime('now'))
     )
   `);
+
+  const indexes = [
+    'CREATE INDEX IF NOT EXISTS idx_interfaces_status ON interfaces(status)',
+    'CREATE INDEX IF NOT EXISTS idx_interfaces_category ON interfaces(category)',
+    'CREATE INDEX IF NOT EXISTS idx_parameters_interface ON parameters(interface_id)',
+    'CREATE INDEX IF NOT EXISTS idx_fields_model ON fields(model_name)',
+    'CREATE INDEX IF NOT EXISTS idx_mappings_interface ON field_mappings(interface_id)',
+    'CREATE INDEX IF NOT EXISTS idx_logs_interface ON api_logs(interface_id)',
+    'CREATE INDEX IF NOT EXISTS idx_logs_created ON api_logs(created_at)',
+    'CREATE INDEX IF NOT EXISTS idx_mock_path ON mock_configs(path, method)',
+    'CREATE INDEX IF NOT EXISTS idx_change_history_interface ON change_history(interface_id)',
+    'CREATE INDEX IF NOT EXISTS idx_change_history_created ON change_history(created_at)',
+    'CREATE INDEX IF NOT EXISTS idx_interface_versions_interface ON interface_versions(interface_id)',
+    'CREATE INDEX IF NOT EXISTS idx_interface_versions_created ON interface_versions(created_at)',
+    'CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status)',
+    'CREATE INDEX IF NOT EXISTS idx_approvals_requester ON approvals(requester_id)',
+    'CREATE INDEX IF NOT EXISTS idx_pipeline_runs_config ON pipeline_runs(config_id)',
+    'CREATE INDEX IF NOT EXISTS idx_pipeline_runs_status ON pipeline_runs(status)',
+    'CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id)',
+    'CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(user_id, read)',
+    'CREATE INDEX IF NOT EXISTS idx_traces_trace_id ON traces(trace_id)',
+    'CREATE INDEX IF NOT EXISTS idx_traces_created ON traces(created_at)',
+    'CREATE INDEX IF NOT EXISTS idx_traces_operation ON traces(operation_name)',
+    'CREATE INDEX IF NOT EXISTS idx_gateway_routes_path ON gateway_routes(path)',
+    'CREATE INDEX IF NOT EXISTS idx_rate_limit_rules_path ON rate_limit_rules(path)',
+    'CREATE INDEX IF NOT EXISTS idx_test_results_suite ON test_results(suite_id)',
+    'CREATE INDEX IF NOT EXISTS idx_workflow_executions_workflow ON workflow_executions(workflow_id)',
+    'CREATE INDEX IF NOT EXISTS idx_i18n_translations_locale ON i18n_translations(locale)',
+    'CREATE INDEX IF NOT EXISTS idx_alert_rules_type ON alert_rules(type)',
+    'CREATE INDEX IF NOT EXISTS idx_alert_history_rule ON alert_history(rule_id)',
+    'CREATE INDEX IF NOT EXISTS idx_api_favorites_user ON api_favorites(user_id)',
+    'CREATE INDEX IF NOT EXISTS idx_api_reviews_interface ON api_reviews(interface_id)',
+    'CREATE INDEX IF NOT EXISTS idx_realtime_messages_channel ON realtime_messages(channel)',
+  ];
+
+  for (const idxSQL of indexes) {
+    try { sqliteDb.exec(idxSQL); } catch {}
+  }
 }
 
-export const ready = initDatabase();
+initDatabase();
 
-export { pool };
+export const ready = Promise.resolve();
+
+const poolCompat = {
+  connect: () => {
+    const inTransaction = { active: false };
+    return {
+      query: async (text: string, params?: any[]) => {
+        const convertedSQL = convertSQLSyntax(convertPlaceholders(text));
+        const trimmed = convertedSQL.trim().toUpperCase();
+
+        if (trimmed === 'BEGIN') {
+          sqliteDb.exec('BEGIN');
+          inTransaction.active = true;
+          return { rows: [], rowCount: 0 };
+        }
+        if (trimmed === 'COMMIT') {
+          sqliteDb.exec('COMMIT');
+          inTransaction.active = false;
+          return { rows: [], rowCount: 0 };
+        }
+        if (trimmed === 'ROLLBACK') {
+          sqliteDb.exec('ROLLBACK');
+          inTransaction.active = false;
+          return { rows: [], rowCount: 0 };
+        }
+
+        if (trimmed.startsWith('SELECT') || trimmed.startsWith('PRAGMA') || trimmed.startsWith('WITH')) {
+          const rows = sqliteDb.prepare(convertedSQL).all(...(params || []));
+          return { rows, rowCount: rows.length };
+        }
+
+        const info = sqliteDb.prepare(convertedSQL).run(...(params || []));
+        return { rows: [], rowCount: info.changes };
+      },
+      release: () => {
+        if (inTransaction.active) {
+          try { sqliteDb.exec('ROLLBACK'); } catch {}
+          inTransaction.active = false;
+        }
+      },
+    };
+  },
+  query: async (text: string, params?: any[]) => {
+    return query(text, params);
+  },
+};
+
+export { poolCompat as pool };

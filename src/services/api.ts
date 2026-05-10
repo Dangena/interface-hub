@@ -77,6 +77,46 @@ async function fetchBlob(endpoint: string, options?: RequestInit) {
   }
 }
 
+async function uploadFile(endpoint: string, file: File, fieldName: string = 'file') {
+  const token = localStorage.getItem('token');
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 120000);
+
+  try {
+    const formData = new FormData();
+    formData.append(fieldName, file);
+
+    const response = await fetch(`${API_BASE}${endpoint}`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: formData,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      let errorMsg = `上传失败 (${response.status})`;
+      try {
+        const errorData = await response.json();
+        errorMsg = errorData.error || errorMsg;
+      } catch {}
+      throw new Error(errorMsg);
+    }
+
+    return response.json();
+  } catch (error: any) {
+    clearTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+      throw new Error('上传超时，请稍后重试');
+    }
+    throw error;
+  }
+}
+
 export const api = {
   get: (endpoint: string) => fetchApi(endpoint),
   post: (endpoint: string, data?: any) =>
@@ -92,6 +132,7 @@ export const api = {
   delete: (endpoint: string) =>
     fetchApi(endpoint, { method: 'DELETE' }),
   download: (endpoint: string) => fetchBlob(endpoint),
+  upload: (endpoint: string, file: File, fieldName?: string) => uploadFile(endpoint, file, fieldName),
 };
 
 export default api;

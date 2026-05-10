@@ -17,6 +17,7 @@ import DocsGenerator from './pages/DocsGenerator';
 import Login from './pages/Login';
 import Settings from './pages/Settings';
 import Projects from './pages/Projects';
+import ProjectDetail from './pages/ProjectDetail';
 import Team from './pages/Team';
 import Approvals from './pages/Approvals';
 import Tracing from './pages/Tracing';
@@ -204,6 +205,14 @@ function App() {
             element={
               <PrivateRoute>
                 <AppLayout><Projects /></AppLayout>
+              </PrivateRoute>
+            }
+          />
+          <Route
+            path="/projects/:id"
+            element={
+              <PrivateRoute>
+                <AppLayout><ProjectDetail /></AppLayout>
               </PrivateRoute>
             }
           />

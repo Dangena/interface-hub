@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { pool, query } from '../database.js';
+import { query } from '../database.js';
 
 const router = Router();
 
@@ -149,12 +149,12 @@ router.get('/metrics/endpoints', async (req, res) => {
 router.get('/metrics/timeline', async (req, res) => {
   try {
     const timeline = (await query(`
-      SELECT to_char(created_at, 'YYYY-MM-DD HH24:00') as hour,
+      SELECT strftime('%Y-%m-%d %H:00', created_at) as hour,
              COUNT(*) as request_count,
              AVG(response_time) as avg_response_time,
              SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) as error_count
       FROM api_logs
-      WHERE created_at >= NOW() - INTERVAL '24 hours'
+      WHERE created_at >= datetime('now', '-24 hours')
       GROUP BY hour
       ORDER BY hour ASC
     `)).rows as any[];
@@ -199,7 +199,7 @@ router.post('/alerts', async (req, res) => {
     const windowVal = Number(window) || 5;
 
     await query(`
-      INSERT INTO alert_rules (id, name, type, threshold, "window", enabled, created_at, updated_at)
+      INSERT INTO alert_rules (id, name, type, threshold, [window], enabled, created_at, updated_at)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
     `, [id, name, type, Number(threshold), windowVal, enabledVal, now, now]);
 
@@ -234,7 +234,7 @@ router.put('/alerts/:id', async (req, res) => {
 
     await query(`
       UPDATE alert_rules
-      SET name = $1, type = $2, threshold = $3, "window" = $4, enabled = $5, updated_at = $6
+      SET name = $1, type = $2, threshold = $3, [window] = $4, enabled = $5, updated_at = $6
       WHERE id = $7
     `, [newName, newType, newThreshold, newWindow, newEnabled, now, id]);
 
@@ -292,91 +292,79 @@ router.post('/alerts/check', async (req, res) => {
     const triggeredAlerts: any[] = [];
     const now = new Date().toISOString();
 
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
+    for (const rule of enabledRules) {
+      let actualValue = 0;
+      let exceeded = false;
+      let message = '';
 
-      for (const rule of enabledRules) {
-        let actualValue = 0;
-        let exceeded = false;
-        let message = '';
-
-        switch (rule.type) {
-          case 'response_time': {
-            const windowMinutes = rule.window;
-            const result = (await client.query(`
-              SELECT AVG(response_time) as avg_response_time
-              FROM api_logs
-              WHERE created_at >= NOW() - ($1 * INTERVAL '1 minute')
-            `, [windowMinutes])).rows[0] as any;
-            actualValue = Math.round((result?.avg_response_time || 0) * 100) / 100;
-            exceeded = actualValue > rule.threshold;
-            message = `Response time ${actualValue}ms exceeds threshold ${rule.threshold}ms`;
-            break;
-          }
-          case 'error_rate': {
-            const windowMinutes = rule.window;
-            const result = (await client.query(`
-              SELECT
-                COUNT(*) as total,
-                SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) as errors
-              FROM api_logs
-              WHERE created_at >= NOW() - ($1 * INTERVAL '1 minute')
-            `, [windowMinutes])).rows[0] as any;
-            actualValue = result?.total > 0
-              ? Math.round((result.errors / result.total) * 10000) / 100
-              : 0;
-            exceeded = actualValue > rule.threshold;
-            message = `Error rate ${actualValue}% exceeds threshold ${rule.threshold}%`;
-            break;
-          }
-          case 'health_check': {
-            try {
-              const start = Date.now();
-              await client.query('SELECT 1');
-              actualValue = Date.now() - start;
-              exceeded = actualValue > rule.threshold;
-              message = exceeded
-                ? `Health check response time ${actualValue}ms exceeds threshold ${rule.threshold}ms`
-                : '';
-            } catch (_e: any) {
-              actualValue = -1;
-              exceeded = true;
-              message = 'Health check failed - database unreachable';
-            }
-            break;
-          }
+      switch (rule.type) {
+        case 'response_time': {
+          const windowMinutes = rule.window;
+          const result = (await query(`
+            SELECT AVG(response_time) as avg_response_time
+            FROM api_logs
+            WHERE created_at >= datetime('now', '-' || $1 || ' minutes')
+          `, [windowMinutes])).rows[0] as any;
+          actualValue = Math.round((result?.avg_response_time || 0) * 100) / 100;
+          exceeded = actualValue > rule.threshold;
+          message = `Response time ${actualValue}ms exceeds threshold ${rule.threshold}ms`;
+          break;
         }
-
-        if (exceeded) {
-          const historyId = uuidv4();
-          await client.query(`
-            INSERT INTO alert_history (id, rule_id, triggered_at, metric_value, threshold, message)
-            VALUES ($1, $2, $3, $4, $5, $6)
-          `, [historyId, rule.id, now, actualValue, rule.threshold, message]);
-          await client.query(`
-            UPDATE alert_rules SET last_triggered = $1, updated_at = $2 WHERE id = $3
-          `, [now, now, rule.id]);
-
-          triggeredAlerts.push({
-            id: historyId,
-            alertId: rule.id,
-            alertName: rule.name,
-            type: rule.type,
-            threshold: rule.threshold,
-            actualValue,
-            triggeredAt: now,
-            message,
-          });
+        case 'error_rate': {
+          const windowMinutes = rule.window;
+          const result = (await query(`
+            SELECT
+              COUNT(*) as total,
+              SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) as errors
+            FROM api_logs
+            WHERE created_at >= datetime('now', '-' || $1 || ' minutes')
+          `, [windowMinutes])).rows[0] as any;
+          actualValue = result?.total > 0
+            ? Math.round((result.errors / result.total) * 10000) / 100
+            : 0;
+          exceeded = actualValue > rule.threshold;
+          message = `Error rate ${actualValue}% exceeds threshold ${rule.threshold}%`;
+          break;
+        }
+        case 'health_check': {
+          try {
+            const start = Date.now();
+            await query('SELECT 1');
+            actualValue = Date.now() - start;
+            exceeded = actualValue > rule.threshold;
+            message = exceeded
+              ? `Health check response time ${actualValue}ms exceeds threshold ${rule.threshold}ms`
+              : '';
+          } catch (_e: any) {
+            actualValue = -1;
+            exceeded = true;
+            message = 'Health check failed - database unreachable';
+          }
+          break;
         }
       }
 
-      await client.query('COMMIT');
-    } catch (e) {
-      await client.query('ROLLBACK');
-      throw e;
-    } finally {
-      client.release();
+      if (exceeded) {
+        const historyId = uuidv4();
+        await query(`
+          INSERT INTO alert_history (id, rule_id, triggered_at, metric_value, threshold, message)
+          VALUES ($1, $2, $3, $4, $5, $6)
+        `, [historyId, rule.id, now, actualValue, rule.threshold, message]);
+        await query(`
+          UPDATE alert_rules SET last_triggered = $1, updated_at = $2 WHERE id = $3
+        `, [now, now, rule.id]);
+
+        triggeredAlerts.push({
+          id: historyId,
+          alertId: rule.id,
+          alertName: rule.name,
+          type: rule.type,
+          threshold: rule.threshold,
+          actualValue,
+          triggeredAt: now,
+          message,
+        });
+      }
     }
 
     res.json({

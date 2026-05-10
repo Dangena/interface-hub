@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { FolderPlus, Trash2, Edit, Folder, FileText, Plus } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { FolderPlus, Trash2, Edit, Folder, FileText, Plus, Database, GitBranch, Code } from 'lucide-react';
 import api from '../services/api';
 import { toast } from '../components/Toast';
 import ConfirmDialog from '../components/ConfirmDialog';
@@ -12,11 +13,14 @@ interface Project {
   interfaceCount: number;
   created_at: string;
   updated_at: string;
+  code_files?: any;
+  parsed_result?: any;
 }
 
 const COLORS = ['#3B82F6', '#10B981', '#8B5CF6', '#F59E0B', '#EF4444', '#EC4899', '#06B6D4', '#84CC16'];
 
 export default function Projects() {
+  const navigate = useNavigate();
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -180,58 +184,110 @@ export default function Projects() {
 
       {projects.length > 0 ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {projects.map((project) => (
-            <div
-              key={project.id}
-              className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 hover:shadow-md transition-shadow"
-            >
-              <div className="p-6">
-                <div className="flex items-start justify-between mb-4">
-                  <div className="flex items-center gap-3">
-                    <div
-                      className="w-10 h-10 rounded-lg flex items-center justify-center"
-                      style={{ backgroundColor: project.color + '20' }}
-                    >
-                      <Folder className="w-5 h-5" style={{ color: project.color }} />
-                    </div>
-                    <div>
-                      <h3 className="font-semibold text-gray-900 dark:text-white">{project.name}</h3>
-                      <p className="text-xs text-gray-500 dark:text-gray-400">
-                        {new Date(project.updated_at).toLocaleDateString()} 更新
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <button
-                      onClick={() => handleEdit(project)}
-                      className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition-colors"
-                    >
-                      <Edit className="w-4 h-4" />
-                    </button>
-                    <button
-                      onClick={() => setDeleteTarget(project)}
-                      className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition-colors"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
+          {projects.map((project) => {
+            const hasCode = !!project.code_files && Object.keys(project.code_files).length > 0;
+            const hasParsed = !!project.parsed_result;
+            const pr = project.parsed_result || {};
+            const ifaceCount = (pr.interfaces || []).length;
+            const modelCount = (pr.models || []).length;
+            const tableCount = (pr.tables || []).length;
+            const assocCount = (pr.associations || []).length;
 
-                {project.description && (
-                  <p className="text-sm text-gray-600 dark:text-gray-400 mb-4 line-clamp-2">
-                    {project.description}
-                  </p>
-                )}
-
-                <div className="flex items-center gap-4 text-sm text-gray-500 dark:text-gray-400">
-                  <div className="flex items-center gap-1">
-                    <FileText className="w-4 h-4" />
-                    {project.interfaceCount} 个接口
+            return (
+              <div
+                key={project.id}
+                onClick={() => navigate(`/projects/${project.id}`)}
+                className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 hover:shadow-md transition-shadow cursor-pointer"
+              >
+                <div className="p-6">
+                  <div className="flex items-start justify-between mb-4">
+                    <div className="flex items-center gap-3">
+                      <div
+                        className="w-10 h-10 rounded-lg flex items-center justify-center"
+                        style={{ backgroundColor: project.color + '20' }}
+                      >
+                        <Folder className="w-5 h-5" style={{ color: project.color }} />
+                      </div>
+                      <div>
+                        <h3 className="font-semibold text-gray-900 dark:text-white">{project.name}</h3>
+                        <p className="text-xs text-gray-500 dark:text-gray-400">
+                          {new Date(project.updated_at).toLocaleDateString()} 更新
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                      <button
+                        onClick={() => handleEdit(project)}
+                        className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition-colors"
+                      >
+                        <Edit className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => setDeleteTarget(project)}
+                        className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition-colors"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
                   </div>
+
+                  {project.description && (
+                    <p className="text-sm text-gray-600 dark:text-gray-400 mb-4 line-clamp-2">
+                      {project.description}
+                    </p>
+                  )}
+
+                  <div className="flex items-center gap-4 text-sm text-gray-500 dark:text-gray-400">
+                    <div className="flex items-center gap-1">
+                      <FileText className="w-4 h-4" />
+                      {project.interfaceCount} 个接口
+                    </div>
+                  </div>
+
+                  {hasParsed && (
+                    <div className="mt-4 pt-4 border-t border-gray-100 dark:border-gray-700">
+                      <div className="grid grid-cols-4 gap-2 text-center">
+                        <div>
+                          <div className="text-lg font-bold text-blue-600">{ifaceCount}</div>
+                          <div className="text-xs text-gray-500">接口</div>
+                        </div>
+                        <div>
+                          <div className="text-lg font-bold text-orange-600">{modelCount}</div>
+                          <div className="text-xs text-gray-500">模型</div>
+                        </div>
+                        <div>
+                          <div className="text-lg font-bold text-green-600">{tableCount}</div>
+                          <div className="text-xs text-gray-500">数据表</div>
+                        </div>
+                        <div>
+                          <div className="text-lg font-bold text-purple-600">{assocCount}</div>
+                          <div className="text-xs text-gray-500">关联</div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {!hasCode && (
+                    <div className="mt-4 pt-4 border-t border-gray-100 dark:border-gray-700">
+                      <div className="flex items-center gap-2 text-xs text-gray-400">
+                        <Code className="w-3.5 h-3.5" />
+                        <span>点击上传代码或输入URL开始解析</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {hasCode && !hasParsed && (
+                    <div className="mt-4 pt-4 border-t border-gray-100 dark:border-gray-700">
+                      <div className="flex items-center gap-2 text-xs text-yellow-600">
+                        <GitBranch className="w-3.5 h-3.5" />
+                        <span>代码已上传，待解析</span>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       ) : (
         <div className="text-center py-20">

@@ -39,6 +39,13 @@ app.use(
   },
 )
 
+app.use(express.static(path.join(__dirname, '..', 'dist')))
+
+app.get('*', (req: Request, res: Response, next: NextFunction) => {
+  if (req.path.startsWith('/api')) return next()
+  res.sendFile(path.join(__dirname, '..', 'dist', 'index.html'))
+})
+
 app.use((error: Error, req: Request, res: Response, next: NextFunction) => {
   res.status(500).json({
     success: false,
