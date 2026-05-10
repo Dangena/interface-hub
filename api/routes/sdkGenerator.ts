@@ -27,6 +27,24 @@ interface GenerateOptions {
 
 const sdkStore = new Map<string, { code: string; template: string; className: string; createdAt: string }>();
 
+async function saveSdk(id: string, template: string, className: string, code: string, interfaceCount: number) {
+  await dbQuery(
+    'INSERT INTO generated_sdks (id, template, class_name, code, interface_count, created_at) VALUES ($1, $2, $3, $4, $5, $6)',
+    [id, template, className, code, interfaceCount, new Date().toISOString()]
+  );
+  sdkStore.set(id, { code, template, className, createdAt: new Date().toISOString() });
+}
+
+async function getSdk(id: string) {
+  const cached = sdkStore.get(id);
+  if (cached) return cached;
+  const row = (await dbQuery('SELECT * FROM generated_sdks WHERE id = $1', [id])).rows[0];
+  if (!row) return null;
+  const result = { code: row.code, template: row.template, className: row.class_name, createdAt: row.created_at };
+  sdkStore.set(id, result);
+  return result;
+}
+
 const AVAILABLE_TEMPLATES = [
   { id: 'typescript-axios', name: 'TypeScript Axios', language: 'typescript', extension: 'ts' },
   { id: 'typescript-fetch', name: 'TypeScript Fetch', language: 'typescript', extension: 'ts' },
@@ -760,7 +778,7 @@ router.get('/templates', (_req, res) => {
   });
 });
 
-router.post('/generate', (req, res) => {
+router.post('/generate', async (req, res) => {
   try {
     const { interfaces, template, options } = req.body as {
       interfaces: InterfaceDef[];
@@ -792,12 +810,7 @@ router.post('/generate', (req, res) => {
 
     const id = uuidv4();
     const className = opts.className || 'ApiClient';
-    sdkStore.set(id, {
-      code,
-      template,
-      className,
-      createdAt: new Date().toISOString(),
-    });
+    await saveSdk(id, template, className, code, interfaces.length);
 
     res.status(201).json({
       id,
@@ -888,12 +901,7 @@ router.post('/generate-from-db', async (req, res) => {
 
     const id = uuidv4();
     const className = opts.className || 'ApiClient';
-    sdkStore.set(id, {
-      code,
-      template,
-      className,
-      createdAt: new Date().toISOString(),
-    });
+    await saveSdk(id, template, className, code, interfaces.length);
 
     res.status(201).json({
       id,
@@ -908,10 +916,10 @@ router.post('/generate-from-db', async (req, res) => {
   }
 });
 
-router.get('/download/:id', (req, res) => {
+router.get('/download/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const sdk = sdkStore.get(id);
+    const sdk = await getSdk(id);
 
     if (!sdk) {
       return res.status(404).json({ error: 'SDK not found. It may have expired or the ID is invalid.' });

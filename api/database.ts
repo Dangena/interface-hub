@@ -500,6 +500,17 @@ async function initDatabase() {
   await query(`CREATE INDEX IF NOT EXISTS idx_api_favorites_user ON api_favorites(user_id)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_api_reviews_interface ON api_reviews(interface_id)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_realtime_messages_channel ON realtime_messages(channel)`);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS generated_sdks (
+      id TEXT PRIMARY KEY,
+      template TEXT NOT NULL,
+      class_name TEXT NOT NULL,
+      code TEXT NOT NULL,
+      interface_count INTEGER DEFAULT 0,
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
 }
 
 export const ready = initDatabase();
